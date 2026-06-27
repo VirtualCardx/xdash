@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>xdash — 服务器监控</title>
+  <link rel="stylesheet" href="/style.css" />
+  <!-- Chart.js 用于绘制历史趋势曲线 -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <!-- 登录视图 -->
+  <div id="login-view" class="login-view">
+    <form id="login-form" class="login-card">
+      <h1>xdash</h1>
+      <p class="subtitle">输入访问密码</p>
+      <input type="password" id="login-password" placeholder="密码" autocomplete="current-password" required />
+      <button type="submit">登录</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </div>
+
+  <!-- 主视图 -->
+  <div id="app-view" class="app-view hidden">
+    <header>
+      <h1>🖥️ xdash</h1>
+      <button id="logout-btn">退出</button>
+    </header>
+
+    <!-- 设备列表视图 -->
+    <section id="devices-view">
+      <div id="devices-grid" class="devices-grid"></div>
+    </section>
+
+    <!-- 设备详情视图 -->
+    <section id="detail-view" class="hidden">
+      <button id="back-btn" class="back-btn">← 返回设备列表</button>
+      <div id="detail-content"></div>
+    </section>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

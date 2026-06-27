@@ -1,0 +1,26 @@
+name = "xdash"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# 静态网页资源（Workers Static Assets）。/ws 与 /api 由 Worker 处理，
+# 其余路径（如 /、/app.js、/style.css）由 ASSETS 绑定直接返回。
+[assets]
+directory = "../web"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# 部署后通过 https://<worker-name>.<account-subdomain>.workers.dev 访问
+# 也可在 Cloudflare 控制台绑定自定义域名
+
+# D1 数据库绑定
+[[d1_databases]]
+binding = "DB"
+database_name = "xdash"
+database_id = "在这里填入 wrangler d1 create xdash 返回的 id"
+
+# 以下为 secret，不要写明文，用 wrangler secret put 设置：
+#   DEVICE_TOKEN   客户端握手 token（客户端与 Worker 必须一致）
+#   WEB_PASSWORD   网页登录密码
+#   JWT_SECRET     网页会话签名密钥（建议随机长串）
+#   HISTORY_DAYS   (可选) 历史保留天数，默认 7

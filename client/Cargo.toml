@@ -1,0 +1,22 @@
+[package]
+name = "xdash"
+version = "1.0.0"
+edition = "2021"
+description = "xdash Linux 服务器监控客户端"
+# 单文件二进制，无需额外配置
+
+[dependencies]
+sysinfo = "0.32"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+opt-level = "z"      # 最小体积优化
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

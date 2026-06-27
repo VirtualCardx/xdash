@@ -1,0 +1,30 @@
+# ===== Rust 客户端 =====
+client/target/
+**/*.rs.bk
+
+# ===== Node / Cloudflare Workers 服务端 =====
+server/node_modules/
+server/.wrangler/
+server/.dev.vars
+server/.dev.vars.*
+wrangler.toml.bak
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 编辑器 / IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===== 敏感信息（绝不提交）=====
+# 本地 secrets、device_id、临时凭证
+.dev.vars
+*.secret
+.env
+.env.*
+!server/wrangler.toml.example
