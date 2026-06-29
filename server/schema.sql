@@ -1,5 +1,7 @@
--- xdash D1 数据库建表脚本
--- 用法: wrangler d1 execute xdash --remote --file=schema.sql
+-- xdash SQLite 数据库建表脚本（参考用）。
+-- 服务端启动时会自动执行等价的 CREATE TABLE IF NOT EXISTS，通常无需手动运行。
+-- 如需手动初始化（例如用 sqlite3 CLI）：
+--   sqlite3 data/xdash.db < schema.sql
 
 -- 设备实时最新值（每 ~3s UPSERT 一次）
 CREATE TABLE IF NOT EXISTS device_latest (
@@ -12,7 +14,7 @@ CREATE TABLE IF NOT EXISTS device_latest (
   uptime_seconds   INTEGER,
   cpu_model        TEXT,
   cpu_cores        INTEGER,
-  total_memory     BIGINT,
+  total_memory     INTEGER,
   ip_local         TEXT,
   ip_public        TEXT,
   cpu_percent      REAL,
@@ -27,14 +29,14 @@ CREATE TABLE IF NOT EXISTS device_latest (
 
 -- 历史采样点（每 ~15s 插入一条，供趋势图）
 CREATE TABLE IF NOT EXISTS metrics_history (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  device_id     TEXT,
-  ts            INTEGER,
-  cpu_percent   REAL,
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  device_id      TEXT,
+  ts             INTEGER,
+  cpu_percent    REAL,
   memory_percent REAL,
-  disk_percent  REAL,
-  net_rx        REAL,
-  net_tx        REAL
+  disk_percent   REAL,
+  net_rx         REAL,
+  net_tx         REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_history_device_ts ON metrics_history(device_id, ts);

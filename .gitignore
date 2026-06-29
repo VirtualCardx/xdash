@@ -2,12 +2,13 @@
 client/target/
 **/*.rs.bk
 
-# ===== Node / Cloudflare Workers 服务端 =====
+# ===== Node.js 服务端 =====
 server/node_modules/
-server/.wrangler/
-server/.dev.vars
-server/.dev.vars.*
-wrangler.toml.bak
+server/dist/
+# SQLite 数据文件（含 WAL/SHM 临时文件）
+server/data/*.db
+server/data/*.db-wal
+server/data/*.db-shm
 
 # ===== 操作系统 =====
 .DS_Store
@@ -22,9 +23,8 @@ desktop.ini
 *~
 
 # ===== 敏感信息（绝不提交）=====
-# 本地 secrets、device_id、临时凭证
-.dev.vars
-*.secret
+# .env 含 token/密码/密钥
 .env
 .env.*
-!server/wrangler.toml.example
+!server/.env.example
+*.secret

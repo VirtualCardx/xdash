@@ -2,17 +2,27 @@
   "name": "xdash-server",
   "version": "1.0.0",
   "private": true,
-  "description": "xdash serverless server on Cloudflare Workers + D1",
+  "description": "xdash server on Node.js (Express + better-sqlite3 + ws)",
+  "type": "module",
+  "main": "dist/index.js",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "db:create": "wrangler d1 create xdash",
-    "db:init": "wrangler d1 execute xdash --remote --file=schema.sql",
-    "db:init:local": "wrangler d1 execute xdash --local --file=schema.sql"
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250615.0",
-    "typescript": "^5.5.0",
-    "wrangler": "^3.90.0"
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.13.0",
+    "@types/ws": "^8.5.14",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0"
   }
 }

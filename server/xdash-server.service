@@ -1,0 +1,51 @@
+# xdash 服务端 systemd 服务模板
+#
+# 安装步骤（在服务器上以 root 执行）：
+#   1. 把项目放到 /opt/xdash：
+#        git clone <repo> /opt/xdash   （或拷贝项目目录）
+#   2. 安装依赖并编译：
+#        cd /opt/xdash/server
+#        cp .env.example .env && 编辑 .env 填入真实值
+#        npm install
+#        npm run build                 # 产出 dist/
+#   3. 复制本文件到 /etc/systemd/system/xdash-server.service
+#   4. 启动并设为开机自启：
+#        systemctl daemon-reload
+#        systemctl enable --now xdash-server
+#   5. 查看状态/日志：
+#        systemctl status xdash-server
+#        journalctl -u xdash-server -f
+
+[Unit]
+Description=xdash server (Node.js + Express + better-sqlite3)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/xdash/server
+ExecStart=/usr/bin/node dist/index.js
+
+# 环境变量（也可在此覆盖 .env 中的值）
+Environment=NODE_ENV=production
+Environment=PORT=3000
+# Environment=TRUST_PROXY=true
+
+# 运行身份（注意：需要能写入 data/ 目录的权限）
+User=www-data
+Group=www-data
+
+# 重启策略
+Restart=always
+RestartSec=5
+
+# 安全加固
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# 允许写入 data/（SQLite 数据文件）
+ReadWritePaths=/opt/xdash/server/data
+
+[Install]
+WantedBy=multi-user.target

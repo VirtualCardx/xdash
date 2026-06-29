@@ -1,24 +1,80 @@
-// HTTP API：登录、设备列表、设备详情、历史趋势。
+// HTTP API（Express Router）：登录、设备列表、设备详情、历史趋势。
 // 所有 /api/*（除 /api/login）都需校验会话 token。
 
-import { listDevices, getDevice, getHistory, type DeviceRow } from "./db";
-import { checkWebPassword, issueSessionToken, verifySessionToken, extractBearer } from "./auth";
-import type { Env } from "./env";
+import { Router, type Request, type Response, type NextFunction } from "express";
+import { listDevices, getDevice, getHistory, type DeviceRow } from "./db.js";
+import {
+  checkWebPassword,
+  issueSessionToken,
+  verifySessionToken,
+  extractBearer,
+} from "./auth.js";
 
 const ONLINE_THRESHOLD = 15; // 15s 内有上报视为在线
 
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json; charset=utf-8" },
-  });
+export const apiRouter = Router();
+
+// 登录不要求认证
+apiRouter.post("/login", (req: Request, res: Response) => {
+  const { password } = req.body as { password?: string };
+  if (!password || !checkWebPassword(password)) {
+    res.status(401).json({ ok: false, error: "密码错误" });
+    return;
+  }
+  const token = issueSessionToken();
+  res.json({ ok: true, token });
+});
+
+// 以下接口都需要登录
+apiRouter.use(requireAuth);
+
+// 设备列表
+apiRouter.get("/devices", (_req: Request, res: Response) => {
+  const rows = listDevices();
+  res.json({ ok: true, devices: rows.map(shapeDevice) });
+});
+
+// 单设备实时详情
+apiRouter.get("/devices/:id", (req: Request, res: Response) => {
+  const row = getDevice(decodeURIComponent(req.params.id));
+  if (!row) {
+    res.status(404).json({ ok: false, error: "设备不存在" });
+    return;
+  }
+  res.json({ ok: true, device: shapeDevice(row) });
+});
+
+// 历史趋势
+apiRouter.get("/devices/:id/history", (req: Request, res: Response) => {
+  const range = (req.query.range as string) ?? "1h";
+  const hours = rangeToHours(range);
+  const since = Math.floor(Date.now() / 1000) - hours * 3600;
+  const points = getHistory(decodeURIComponent(req.params.id), since);
+  res.json({ ok: true, range, points });
+});
+
+// ---------- 中间件/工具 ----------
+function requireAuth(req: Request, res: Response, next: NextFunction): void {
+  const token = extractBearer(req.header("Authorization"));
+  if (!token || !verifySessionToken(token)) {
+    res.status(401).json({ ok: false, error: "未授权" });
+    return;
+  }
+  next();
 }
 
-// 校验请求中的会话 token
-async function requireAuth(request: Request, env: Env): Promise<boolean> {
-  const token = extractBearer(request.headers.get("Authorization"));
-  if (!token) return false;
-  return verifySessionToken(env, token);
+function isOnline(lastSeen: number | null): boolean {
+  if (!lastSeen) return false;
+  return Math.floor(Date.now() / 1000) - lastSeen < ONLINE_THRESHOLD;
+}
+
+function safeParse(s: string | null): unknown {
+  if (!s) return null;
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
 }
 
 // 把原始 DeviceRow 转成前端友好结构（解析 JSON 字段 + 计算在线状态）
@@ -45,72 +101,6 @@ function shapeDevice(row: DeviceRow) {
     last_seen: row.last_seen,
     online: isOnline(row.last_seen),
   };
-}
-
-function safeParse(s: string | null): unknown {
-  if (!s) return null;
-  try {
-    return JSON.parse(s);
-  } catch {
-    return null;
-  }
-}
-
-function isOnline(lastSeen: number | null): boolean {
-  if (!lastSeen) return false;
-  return Math.floor(Date.now() / 1000) - lastSeen < ONLINE_THRESHOLD;
-}
-
-export async function handleApi(
-  request: Request,
-  env: Env,
-  path: string,
-): Promise<Response> {
-  const method = request.method;
-
-  // POST /api/login —— 校验网页密码，派发会话 token
-  if (path === "/api/login" && method === "POST") {
-    const body = await request
-      .json<{ password?: string }>()
-      .catch(() => ({}) as { password?: string });
-    if (!body.password || !checkWebPassword(env, body.password)) {
-      return json({ ok: false, error: "密码错误" }, 401);
-    }
-    const token = await issueSessionToken(env);
-    return json({ ok: true, token });
-  }
-
-  // 以下接口都需要登录
-  if (!(await requireAuth(request, env))) {
-    return json({ ok: false, error: "未授权" }, 401);
-  }
-
-  // GET /api/devices —— 设备列表
-  if (path === "/api/devices" && method === "GET") {
-    const rows = await listDevices(env.DB);
-    return json({ ok: true, devices: rows.map(shapeDevice) });
-  }
-
-  // GET /api/devices/:id —— 单设备实时详情
-  const detailMatch = /^\/api\/devices\/([^/]+)$/.exec(path);
-  if (detailMatch && method === "GET") {
-    const row = await getDevice(env.DB, decodeURIComponent(detailMatch[1]));
-    if (!row) return json({ ok: false, error: "设备不存在" }, 404);
-    return json({ ok: true, device: shapeDevice(row) });
-  }
-
-  // GET /api/devices/:id/history?range=1h|6h|24h —— 历史趋势
-  const histMatch = /^\/api\/devices\/([^/]+)\/history$/.exec(path);
-  if (histMatch && method === "GET") {
-    const url = new URL(request.url);
-    const range = url.searchParams.get("range") ?? "1h";
-    const hours = rangeToHours(range);
-    const since = Math.floor(Date.now() / 1000) - hours * 3600;
-    const points = await getHistory(env.DB, decodeURIComponent(histMatch[1]), since);
-    return json({ ok: true, range, points });
-  }
-
-  return json({ ok: false, error: "Not Found" }, 404);
 }
 
 function rangeToHours(range: string): number {
