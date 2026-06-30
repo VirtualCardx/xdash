@@ -217,7 +217,7 @@ function renderDetail(d) {
 
     <div class="panels">
       ${topPanel("CPU 占用前 5", d.cpu_top, "cpu")}
-      ${topPanel("内存占用前 5", d.memory_top, "mem")}
+      ${topPanel("内存占用前 5 <span class='metric-tag'>PSS</span>", d.memory_top, "mem")}
     </div>
 
     <div class="table-block">
@@ -261,13 +261,19 @@ function renderDetail(d) {
 
 function topPanel(title, items, field) {
   if (!items || !items.length) return "";
-  // cpu: 百分比；mem: 字节（服务端直接存 sysinfo 的 process.memory() 字节数）
+  // cpu: 百分比；mem: PSS 字节（共享内存按进程数均分，之和≈真实占用）
   const val = (it) =>
     field === "cpu" ? `${(it.cpu ?? 0).toFixed(1)}%` : fmtBytes(it.mem ?? 0);
+  // mem 面板追加一行口径说明
+  const note =
+    field === "mem"
+      ? '<p class="panel-note">PSS：共享内存按进程均分，比 RSS 更接近真实占用</p>'
+      : "";
   return `
     <div class="top-panel">
       <h4>${title}</h4>
       <ol>${items.map((it) => `<li><span class="pname">${escapeHtml(it.name)}</span><span class="pval">${val(it)}</span></li>`).join("")}</ol>
+      ${note}
     </div>`;
 }
 

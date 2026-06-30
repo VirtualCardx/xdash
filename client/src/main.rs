@@ -1,6 +1,10 @@
 // xdash 客户端：Linux 服务器监控数据采集，WebSocket 上报。
 // 单文件实现。采集间隔 0.5s，上报间隔默认 3s，断线指数退避重连。
 //
+// 注意：进程内存按 PSS（Proportional Set Size）统计，需读取
+//   /proc/[pid]/smaps_rollup，因此必须以 root 运行，才能采集到全部进程
+//   的准确内存（否则只能读到自身可访问的进程）。见 xdash.service。
+//
 // 配置（环境变量）：
 //   XDASH_URL      必填，服务端 ws/wss 地址，如 wss://xdash.example.workers.dev/ws
 //   XDASH_TOKEN    必填，与服务端 DEVICE_TOKEN 一致的预共享 token
@@ -35,6 +39,9 @@ struct ProcItem {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     cpu: Option<f32>,
+    /// 进程内存（字节）。口径为 PSS（Proportional Set Size）：
+    /// 读自 /proc/[pid]/smaps_rollup 的 Pss 字段，把共享内存按进程数均分，
+    /// 所有进程 PSS 之和≈整机真实进程内存占用。需以 root 运行才能读到全部进程。
     #[serde(skip_serializing_if = "Option::is_none")]
     mem: Option<u64>,
 }
@@ -222,21 +229,23 @@ impl Collector {
             })
             .collect();
 
-        // 内存占用前 5 进程
+        // 内存占用前 5 进程（口径为 PSS：把共享内存按进程数均分，更接近真实占用）。
+        // PSS 读自 /proc/[pid]/smaps_rollup（需 root 才能读到全部进程）。
+        // 先为每个进程算出 PSS 再排序，避免先排序后读取造成 top 漂移。
         let mut mem_procs: Vec<(Pid, u64)> = sys
             .processes()
-            .iter()
-            .map(|(pid, p)| (*pid, p.memory()))
+            .keys()
+            .map(|pid| (*pid, read_pss(*pid)))
             .collect();
         mem_procs.sort_by(|a, b| b.1.cmp(&a.1));
         let memory_top: Vec<ProcItem> = mem_procs
             .iter()
             .take(5)
-            .filter_map(|(pid, mem)| {
+            .filter_map(|(pid, pss)| {
                 sys.process(*pid).map(|p| ProcItem {
                     name: p.name().to_string_lossy().into_owned(),
                     cpu: None,
-                    mem: Some(*mem),
+                    mem: Some(*pss),
                 })
             })
             .collect();
@@ -331,6 +340,31 @@ fn local_ip() -> Option<String> {
             s.connect("8.8.8.8:80").ok()?;
             s.local_addr().ok().map(|a| a.ip().to_string())
         })
+}
+
+/// 读取进程的 PSS（Proportional Set Size，字节）。
+/// 来源：/proc/[pid]/smaps_rollup 的 Pss 字段（单位 KB）。
+/// PSS 把共享内存按使用该内存的进程数均分，相比 RSS（sysinfo 的 memory()）
+/// 不会重复计入共享库，所有进程 PSS 之和≈整机真实进程内存占用。
+/// 需 root 才能读到其他用户的进程；读失败（权限/内核无此文件）返回 0。
+fn read_pss(pid: Pid) -> u64 {
+    let path = format!("/proc/{}/smaps_rollup", pid.as_u32());
+    let Ok(content) = fs::read_to_string(&path) else {
+        return 0;
+    };
+    // 找 "Pss:" 开头的行，格式形如 "Pss:\t\t1100 kB"
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("Pss:") {
+            // 取行中第一个数字（KB）
+            if let Some(kb) = rest.split_whitespace().next() {
+                if let Ok(kb) = kb.parse::<u64>() {
+                    return kb.saturating_mul(1024);
+                }
+            }
+            break;
+        }
+    }
+    0
 }
 
 fn now_ts() -> u64 {

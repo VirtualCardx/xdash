@@ -181,7 +181,7 @@ Environment="XDASH_URL=ws://<服务端IP>:3000/ws"
 Environment="XDASH_TOKEN=与服务端 .env 中 DEVICE_TOKEN 一致"
 ```
 
-> ⚠️ `nobody` 用户读取进程列表等需要适当权限。如遇权限不足导致数据缺失，可临时改用有权限的专用用户，或调整 service 的安全限制。
+> ⚠️ **客户端必须以 root 运行**。进程内存按 PSS（Proportional Set Size）统计，需读取 `/proc/[pid]/smaps_rollup`，而 Linux 默认普通用户无法读取其他用户的进程 smaps。`xdash.service` 默认未设置 `User=`（即以 root 运行），请保持不变，否则 memory_top 中其他用户进程的内存会读不到（归零失真）。
 
 启动并设为开机自启：
 
@@ -249,7 +249,8 @@ sysinfo 的进程 CPU% 依赖两次刷新的差值，客户端首次启动后需
 - 客户端→服务端：生产环境建议用 nginx 套 HTTPS（`wss://`），token 作为 WebSocket 握手查询参数。
 - 网页：登录密码经 HMAC-SHA256 签名会话，token 存 localStorage。
 - 本系统为**单用户**模型，不区分多账号；多查看者共用同一密码。
-- 客户端以 `nobody` 身份运行并开启了 systemd 安全加固；读取系统指标所需的最小权限已保留。
+- 客户端以 **root** 身份运行（读取全部进程的 PSS 所必需），并开启了 systemd 安全加固（`NoNewPrivileges`/`ProtectSystem` 等），尽量收敛 root 的实际风险。
+- 进程内存口径为 **PSS（Proportional Set Size）**：共享内存按使用进程数均分，所有进程 PSS 之和≈整机真实进程内存占用；相比 `top`/桌面监视器默认的 RSS（会重复计入共享库），PSS 更接近实际占用。
 - `.env` 含敏感信息，已被 `.gitignore` 忽略，不会提交到仓库。
 
 ---

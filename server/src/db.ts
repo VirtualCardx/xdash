@@ -9,7 +9,9 @@ import { config } from "./config.js";
 export interface ProcItem {
   name: string;
   cpu?: number; // %
-  mem?: number; // 字节
+  // 进程内存（字节），口径为 PSS（Proportional Set Size）：
+  // 共享内存按进程数均分，之和≈整机真实进程内存占用。客户端需 root 才能采集到。
+  mem?: number;
 }
 
 export interface DiskItem {

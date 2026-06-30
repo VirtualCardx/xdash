@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS device_latest (
   cpu_percent      REAL,
   memory_percent   REAL,
   cpu_top          TEXT,   -- JSON 字符串: [{"name","cpu"}]
-  memory_top       TEXT,   -- JSON 字符串: [{"name","mem"}]
+  memory_top       TEXT,   -- JSON 字符串: [{"name","mem"}]，mem 为 PSS(字节)
   disk             TEXT,   -- JSON 字符串: [{"mount","used","total","percent"}]
   network          TEXT,   -- JSON 字符串: [{"name","rx_rate","tx_rate"}]
   last_seen        INTEGER,

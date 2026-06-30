@@ -1,5 +1,9 @@
 # xdash 客户端 systemd 服务模板
 #
+# 注意：进程内存按 PSS 统计，需读取 /proc/[pid]/smaps_rollup，
+#       因此必须以 root 运行（见下方，无 User= 项）。以普通用户运行
+#       会导致其他用户进程的内存读取失败（PSS 归零，memory_top 失真）。
+#
 # 安装步骤（在 Linux 服务器上以 root 执行）：
 #   1. 把编译好的二进制放到 /usr/local/bin/xdash 并赋予执行权限：
 #        install -m 0755 xdash /usr/local/bin/xdash
@@ -21,25 +25,25 @@ Wants=network-online.target
 Type=simple
 ExecStart=/usr/local/bin/xdash
 
-# 环境变量（请按实际情况修改）
-Environment="XDASH_URL=wss://your-worker.your-subdomain.workers.dev/ws"
-Environment="XDASH_TOKEN=替换为与服务端一致的预共享 token"
-# Environment="XDASH_INTERVAL=3"
+# 以 root 运行（读取全部进程的 smaps_rollup 以采集准确 PSS 所必需）
+# 不设置 User=/Group=，即默认以 root 身份运行
 
-# 运行身份（降低权限）
-User=nobody
-Group=nogroup
+# 环境变量（请按实际情况修改）
+Environment="XDASH_URL=ws://<服务端IP>:3000/ws"
+Environment="XDASH_TOKEN=替换为与服务端 .env 中 DEVICE_TOKEN 一致"
+# Environment="XDASH_INTERVAL=3"
 
 # 重启策略
 Restart=always
 RestartSec=5
 
-# 安全加固
+# 安全加固（root 下仍保留这些限制）
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-# 注意：读取系统指标需要保留相应能力；不要加 RestrictAddressFamilies 限制 AF_NETLINK 等
+# 注意：读取系统指标/proc 需要保留相应访问，不要加过严的 proc 限制
+# 需要读 /proc/[pid]/smaps_rollup，故不设 PrivateDevices/ProcSubset
 
 [Install]
 WantedBy=multi-user.target
