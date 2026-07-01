@@ -247,7 +247,7 @@ XDASH_URL=ws://localhost:3000/ws XDASH_TOKEN=你的token cargo run
 需要 Python 3 和 C++ 编译器（Linux 装 `build-essential`，Alpine 装 `build-base python3`）。或换用预编译二进制：`npm install better-sqlite3 --build-from-source=false`。
 
 **Q: CPU 占用率一直是 0？**
-sysinfo 的进程 CPU% 依赖两次刷新的差值，客户端首次启动后需要 0.5s 建立基准，几秒后即正常。
+客户端 CPU 负载基于 `/proc/stat` 与 `/proc/[pid]/stat` 的两次 jiffies 差值计算，首次启动后需要完成两次采样，几秒后即正常。
 
 **Q: 想要更低的实时延迟？**
 可调小客户端 `XDASH_INTERVAL`（如 1~2s），并把网页轮询间隔调小。实时延迟即可降到 2~3s。

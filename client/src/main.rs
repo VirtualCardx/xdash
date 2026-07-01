@@ -25,10 +25,7 @@ use std::{
     process,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use sysinfo::{
-    CpuRefreshKind, Disks, MemoryRefreshKind, Networks, Pid, ProcessRefreshKind, ProcessesToUpdate,
-    RefreshKind, System,
-};
+use sysinfo::{Disks, MemoryRefreshKind, Networks, RefreshKind, System};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
@@ -103,6 +100,12 @@ struct StaticInfo {
 struct CpuSample {
     total: u64,
     busy: u64,
+}
+
+struct ProcCpuSnapshot {
+    pid: u32,
+    name: String,
+    cpu_time: u64,
 }
 
 // ---------- 配置 ----------
@@ -221,27 +224,22 @@ struct Collector {
     networks: Networks,
     static_info: StaticInfo,
     last_cpu_sample: Option<CpuSample>,
-    last_proc_cpu: HashMap<Pid, u64>, // pid -> utime + stime
+    last_proc_cpu: HashMap<u32, u64>, // pid -> utime + stime
     last_net: HashMap<String, (u64, u64, Instant)>, // name -> (rx, tx, time)
 }
 
 impl Collector {
     fn new() -> Self {
         let mut sys = System::new_with_specifics(
-            RefreshKind::new()
-                .with_cpu(CpuRefreshKind::everything())
-                .with_memory(MemoryRefreshKind::everything())
-                .with_processes(process_refresh_kind()),
+            RefreshKind::new().with_memory(MemoryRefreshKind::everything()),
         );
-        // 刷新一次以拿到基础信息；CPU% 需两次刷新的差值。
-        sys.refresh_cpu_all();
+        // CPU 精准负载基于 /proc jiffies 的两次采样差值；sysinfo 只做辅助展示。
         sys.refresh_memory();
-        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh_kind());
         let disks = Disks::new_with_refreshed_list();
         let networks = Networks::new_with_refreshed_list();
-        let static_info = StaticInfo::from_system(&sys);
+        let static_info = StaticInfo::from_system();
         let last_cpu_sample = read_cpu_sample();
-        let last_proc_cpu = read_process_cpu_times(sys.processes().keys().copied());
+        let last_proc_cpu = read_process_cpu_times();
         Collector {
             sys,
             disks,
@@ -263,8 +261,6 @@ impl Collector {
 
     // 上报时调用：基于最新内部状态构造一份 Report
     fn build_report(&mut self, device_id: &str) -> Report {
-        self.sys
-            .refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh_kind());
         let sys = &self.sys;
 
         // CPU 总占用和进程 CPU 均基于同一轮 /proc jiffies 差值，口径为整机 0-100%。
@@ -292,24 +288,21 @@ impl Collector {
 
         // CPU 占用前 5：按进程名聚合同名条目，再维护 top-N，避免重复显示同一程序。
         let mut cpu_by_name: HashMap<String, f32> = HashMap::new();
-        let mut proc_cpu = HashMap::with_capacity(sys.processes().len());
-        for (pid, process) in sys.processes() {
-            let Some(curr_proc_time) = read_proc_cpu_time(*pid) else {
-                continue;
-            };
-            proc_cpu.insert(*pid, curr_proc_time);
+        let proc_snapshots = read_proc_cpu_snapshots();
+        let mut proc_cpu = HashMap::with_capacity(proc_snapshots.len());
+        for snapshot in &proc_snapshots {
+            proc_cpu.insert(snapshot.pid, snapshot.cpu_time);
             let process_percent = if total_delta > 0 {
                 self.last_proc_cpu
-                    .get(pid)
+                    .get(&snapshot.pid)
                     .map(|prev| {
-                        curr_proc_time.saturating_sub(*prev) as f32 / total_delta as f32 * 100.0
+                        snapshot.cpu_time.saturating_sub(*prev) as f32 / total_delta as f32 * 100.0
                     })
                     .unwrap_or(0.0)
             } else {
                 0.0
             };
-            let name = process.name().to_string_lossy().into_owned();
-            *cpu_by_name.entry(name).or_insert(0.0) += process_percent;
+            *cpu_by_name.entry(snapshot.name.clone()).or_insert(0.0) += process_percent;
         }
 
         let mut cpu_top: Vec<ProcItem> = Vec::with_capacity(TOP_PROCESSES);
@@ -328,9 +321,8 @@ impl Collector {
         // PSS 读自 /proc/[pid]/smaps_rollup（需 root 才能读到全部进程）。
         // 按进程名聚合同名条目的 PSS，再维护 top-N，展示程序级总占用。
         let mut memory_by_name: HashMap<String, u64> = HashMap::new();
-        for (pid, process) in sys.processes() {
-            let name = process.name().to_string_lossy().into_owned();
-            *memory_by_name.entry(name).or_insert(0) += read_pss(*pid);
+        for snapshot in &proc_snapshots {
+            *memory_by_name.entry(snapshot.name.clone()).or_insert(0) += read_pss(snapshot.pid);
         }
 
         let mut memory_top: Vec<ProcItem> = Vec::with_capacity(TOP_PROCESSES);
@@ -421,28 +413,47 @@ impl Collector {
 }
 
 impl StaticInfo {
-    fn from_system(sys: &System) -> Self {
-        let cpu_model = sys
-            .cpus()
-            .first()
-            .map(|c| c.brand().to_string())
-            .unwrap_or_default();
-
+    fn from_system() -> Self {
         StaticInfo {
             hostname: System::host_name().unwrap_or_default(),
             os_name: System::name().unwrap_or_default(),
             os_version: System::os_version().unwrap_or_default(),
             kernel: System::kernel_version().unwrap_or_default(),
             arch: std::env::consts::ARCH.to_string(),
-            cpu_model,
-            cpu_cores: sys.cpus().len(),
+            cpu_model: read_cpu_model().unwrap_or_default(),
+            cpu_cores: read_cpu_core_count(),
             ip_local: local_ip().unwrap_or_default(),
         }
     }
 }
 
-fn process_refresh_kind() -> ProcessRefreshKind {
-    ProcessRefreshKind::new()
+fn read_cpu_model() -> Option<String> {
+    let content = fs::read_to_string("/proc/cpuinfo").ok()?;
+    content.lines().find_map(|line| {
+        line.strip_prefix("model name")
+            .and_then(|rest| rest.split_once(':'))
+            .map(|(_, value)| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn read_cpu_core_count() -> usize {
+    if let Ok(content) = fs::read_to_string("/proc/stat") {
+        let count = content
+            .lines()
+            .filter(|line| {
+                line.strip_prefix("cpu")
+                    .and_then(|rest| rest.chars().next())
+                    .is_some_and(|ch| ch.is_ascii_digit())
+            })
+            .count();
+        if count > 0 {
+            return count;
+        }
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(0)
 }
 
 fn push_cpu_top(top: &mut Vec<ProcItem>, item: ProcItem) {
@@ -500,24 +511,39 @@ fn read_cpu_sample() -> Option<CpuSample> {
     Some(CpuSample { total, busy })
 }
 
-fn read_process_cpu_times(pids: impl Iterator<Item = Pid>) -> HashMap<Pid, u64> {
+fn read_process_cpu_times() -> HashMap<u32, u64> {
     let mut times = HashMap::new();
-    for pid in pids {
-        if let Some(cpu_time) = read_proc_cpu_time(pid) {
-            times.insert(pid, cpu_time);
-        }
+    for snapshot in read_proc_cpu_snapshots() {
+        times.insert(snapshot.pid, snapshot.cpu_time);
     }
     times
 }
 
-fn read_proc_cpu_time(pid: Pid) -> Option<u64> {
-    let stat = fs::read_to_string(format!("/proc/{}/stat", pid.as_u32())).ok()?;
+fn read_proc_cpu_snapshots() -> Vec<ProcCpuSnapshot> {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+        .filter_map(read_proc_cpu_snapshot)
+        .collect()
+}
+
+fn read_proc_cpu_snapshot(pid: u32) -> Option<ProcCpuSnapshot> {
+    let stat = fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    let lparen = stat.find('(')?;
     let rparen = stat.rfind(')')?;
+    let name = stat.get(lparen + 1..rparen)?.to_string();
     let fields = stat.get(rparen + 2..)?;
     let parts: Vec<&str> = fields.split_whitespace().collect();
     let utime = parts.get(11)?.parse::<u64>().ok()?;
     let stime = parts.get(12)?.parse::<u64>().ok()?;
-    Some(utime.saturating_add(stime))
+    Some(ProcCpuSnapshot {
+        pid,
+        name,
+        cpu_time: utime.saturating_add(stime),
+    })
 }
 
 // 读取本机主 IPv4 地址（非回环）
@@ -534,8 +560,8 @@ fn local_ip() -> Option<String> {
 /// PSS 把共享内存按使用该内存的进程数均分，相比 RSS（sysinfo 的 memory()）
 /// 不会重复计入共享库，所有进程 PSS 之和≈整机真实进程内存占用。
 /// 需 root 才能读到其他用户的进程；读失败（权限/内核无此文件）返回 0。
-fn read_pss(pid: Pid) -> u64 {
-    let path = format!("/proc/{}/smaps_rollup", pid.as_u32());
+fn read_pss(pid: u32) -> u64 {
+    let path = format!("/proc/{}/smaps_rollup", pid);
     let Ok(file) = File::open(&path) else {
         return 0;
     };
@@ -585,7 +611,7 @@ async fn main() {
     let mut collector = Collector::new();
 
     loop {
-        // 先采集一轮（建立 CPU 基准），保证首次上报时 cpu_usage 已有有效差值
+        // 先采集一轮（建立内存/网络等辅助指标基准）；CPU 基准在 Collector::new 中读取 /proc。
         collector.tick();
         tokio::time::sleep(COLLECT_INTERVAL).await;
 
