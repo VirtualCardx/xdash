@@ -156,6 +156,8 @@ cargo build --release --target x86_64-unknown-linux-musl
 
 产物：`target/x86_64-unknown-linux-musl/release/xdash`（单文件，无依赖）。
 
+> 客户端用 **rustls**（纯 Rust TLS）而非 native-tls，因此**不需要系统 OpenSSL**，musl 交叉编译零额外配置。连 `wss://`（加密 WebSocket）的根证书也已内置进二进制（webpki-roots）。
+
 > 没有原生 Linux 环境时，推荐用 Docker 交叉编译：
 > ```bash
 > docker run --rm -it -v "$PWD":/work -w /work \

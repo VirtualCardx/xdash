@@ -8,7 +8,10 @@ description = "xdash Linux 服务器监控客户端"
 [dependencies]
 sysinfo = "0.32"
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+# 用 rustls（纯 Rust TLS）替代 native-tls：零系统 OpenSSL 依赖，
+# 适合 musl 静态交叉编译。webpki-roots 把 Mozilla 根证书内置进二进制，
+# 连 wss:// 也不依赖系统的 /etc/ssl/certs。
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
