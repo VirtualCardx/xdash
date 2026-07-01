@@ -255,9 +255,9 @@ impl Collector {
             .refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh_kind());
         let sys = &self.sys;
 
-        // CPU 总占用：所有核心平均
-        let cpu_percent =
-            sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() / sys.cpus().len().max(1) as f32;
+        // CPU 总占用：所有核心平均。进程 CPU 也会除以核心数，保持同一整机口径。
+        let cpu_cores = sys.cpus().len().max(1) as f32;
+        let cpu_percent = sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() / cpu_cores;
 
         // 内存占用百分比
         let total_mem = sys.total_memory();
@@ -276,7 +276,7 @@ impl Collector {
                 &mut cpu_top,
                 ProcItem {
                     name: process.name().to_string_lossy().into_owned(),
-                    cpu: Some(process.cpu_usage()),
+                    cpu: Some(process.cpu_usage() / cpu_cores),
                     mem: None,
                 },
             );
