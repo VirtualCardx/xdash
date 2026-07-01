@@ -290,8 +290,8 @@ impl Collector {
             0.0
         };
 
-        // CPU 占用前 5 进程。只维护 top-N，避免对全部进程排序。
-        let mut cpu_top: Vec<ProcItem> = Vec::with_capacity(TOP_PROCESSES);
+        // CPU 占用前 5：按进程名聚合同名条目，再维护 top-N，避免重复显示同一程序。
+        let mut cpu_by_name: HashMap<String, f32> = HashMap::new();
         let mut proc_cpu = HashMap::with_capacity(sys.processes().len());
         for (pid, process) in sys.processes() {
             let Some(curr_proc_time) = read_proc_cpu_time(*pid) else {
@@ -308,11 +308,17 @@ impl Collector {
             } else {
                 0.0
             };
+            let name = process.name().to_string_lossy().into_owned();
+            *cpu_by_name.entry(name).or_insert(0.0) += process_percent;
+        }
+
+        let mut cpu_top: Vec<ProcItem> = Vec::with_capacity(TOP_PROCESSES);
+        for (name, cpu) in cpu_by_name {
             push_cpu_top(
                 &mut cpu_top,
                 ProcItem {
-                    name: process.name().to_string_lossy().into_owned(),
-                    cpu: Some(process_percent),
+                    name,
+                    cpu: Some(cpu),
                     mem: None,
                 },
             );
@@ -320,15 +326,21 @@ impl Collector {
 
         // 内存占用前 5 进程（口径为 PSS：把共享内存按进程数均分，更接近真实占用）。
         // PSS 读自 /proc/[pid]/smaps_rollup（需 root 才能读到全部进程）。
-        // 逐进程读取 PSS 并维护 top-N，避免全量 Vec 排序和二次进程表查询。
-        let mut memory_top: Vec<ProcItem> = Vec::with_capacity(TOP_PROCESSES);
+        // 按进程名聚合同名条目的 PSS，再维护 top-N，展示程序级总占用。
+        let mut memory_by_name: HashMap<String, u64> = HashMap::new();
         for (pid, process) in sys.processes() {
+            let name = process.name().to_string_lossy().into_owned();
+            *memory_by_name.entry(name).or_insert(0) += read_pss(*pid);
+        }
+
+        let mut memory_top: Vec<ProcItem> = Vec::with_capacity(TOP_PROCESSES);
+        for (name, mem) in memory_by_name {
             push_mem_top(
                 &mut memory_top,
                 ProcItem {
-                    name: process.name().to_string_lossy().into_owned(),
+                    name,
                     cpu: None,
-                    mem: Some(read_pss(*pid)),
+                    mem: Some(mem),
                 },
             );
         }
