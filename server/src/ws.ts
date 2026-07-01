@@ -111,6 +111,7 @@ function normalizeReport(input: unknown): Report | null {
     cpu_model: cleanText(r.cpu_model, MAX_TEXT),
     cpu_cores: cleanInteger(r.cpu_cores, 0, 4096),
     total_memory: cleanInteger(r.total_memory, 0, Number.MAX_SAFE_INTEGER),
+    available_memory: cleanInteger(r.available_memory, 0, Number.MAX_SAFE_INTEGER),
     ip_local: cleanText(r.ip_local, MAX_TEXT),
     cpu_percent: cleanNumber(r.cpu_percent, 0, 10000),
     memory_percent: cleanNumber(r.memory_percent, 0, 100),

@@ -168,7 +168,16 @@ body {
 .card-os {
   color: var(--fg-dim);
   font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.card-ip {
+  color: var(--fg-dim);
+  font-size: 12px;
   margin-bottom: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .card-metrics {
@@ -255,6 +264,12 @@ body {
   font-weight: 600;
 }
 
+.info-grid small {
+  color: var(--fg-dim);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
 .big-metrics {
   display: flex;
   gap: 24px;
@@ -289,9 +304,9 @@ body {
   border-radius: 50%;
 }
 
-.ring {
-  /* 让数字浮于环上 */
-  z-index: 0;
+.ring span {
+  position: relative;
+  z-index: 1;
 }
 
 .big-metric span {

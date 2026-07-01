@@ -77,6 +77,7 @@ struct Report {
     cpu_model: String,
     cpu_cores: usize,
     total_memory: u64,
+    available_memory: u64,
     ip_local: String,
     cpu_percent: f32,
     memory_percent: f32,
@@ -261,6 +262,7 @@ impl Collector {
         // 内存占用百分比
         let total_mem = sys.total_memory();
         let used_mem = sys.used_memory();
+        let available_mem = sys.available_memory();
         let memory_percent = if total_mem > 0 {
             used_mem as f32 / total_mem as f32 * 100.0
         } else {
@@ -353,6 +355,7 @@ impl Collector {
             cpu_model: self.static_info.cpu_model.clone(),
             cpu_cores: self.static_info.cpu_cores,
             total_memory: total_mem,
+            available_memory: available_mem,
             ip_local: self.static_info.ip_local.clone(),
             cpu_percent,
             memory_percent,

@@ -178,6 +178,7 @@ function renderDevices(devices) {
             ${status}
           </div>
           <div class="card-os">${escapeHtml(d.os_name || "")} ${escapeHtml(d.os_version || "")}</div>
+          <div class="card-ip">公网 IP：${escapeHtml(d.ip_public || "-")}</div>
           <div class="card-metrics">
             <div class="metric"><span class="label">CPU</span><span class="value">${cpu.toFixed(1)}%</span></div>
             <div class="metric"><span class="label">内存</span><span class="value">${mem.toFixed(1)}%</span></div>
@@ -253,6 +254,7 @@ async function loadDetail() {
 function renderDetail(d) {
   const cpu = d.cpu_percent ?? 0;
   const mem = d.memory_percent ?? 0;
+  const availableMemory = d.available_memory ?? calcAvailableMemory(d.total_memory, mem);
   const status = d.online
     ? '<span class="badge online">在线</span>'
     : '<span class="badge offline">离线</span>';
@@ -268,17 +270,17 @@ function renderDetail(d) {
         <div><span>本地 IP</span><b>${escapeHtml(d.ip_local || "-")}</b></div>
         <div><span>公网 IP</span><b>${escapeHtml(d.ip_public || "-")}</b></div>
         <div><span>CPU 型号</span><b>${escapeHtml(d.cpu_model || "-")} (${d.cpu_cores || 0} 核)</b></div>
-        <div><span>总内存</span><b>${fmtBytes(d.total_memory)}</b></div>
+        <div><span>总内存</span><b>${fmtBytes(d.total_memory)}</b><small>可用 ${fmtBytes(availableMemory)}</small></div>
       </div>
     </div>
 
     <div class="big-metrics">
       <div class="big-metric">
-        <div class="ring" style="--p:${cpu.toFixed(0)}">${cpu.toFixed(1)}%</div>
+        <div class="ring" style="--p:${cpu.toFixed(0)}"><span>${cpu.toFixed(1)}%</span></div>
         <span>CPU</span>
       </div>
       <div class="big-metric">
-        <div class="ring" style="--p:${mem.toFixed(0)}">${mem.toFixed(1)}%</div>
+        <div class="ring" style="--p:${mem.toFixed(0)}"><span>${mem.toFixed(1)}%</span></div>
         <span>内存</span>
       </div>
     </div>
@@ -298,6 +300,12 @@ function renderDetail(d) {
     </div>
     <p class="updated">最后更新：${fmtAgo(d.last_seen)}</p>
   `;
+}
+
+function calcAvailableMemory(total, percent) {
+  if (total == null || percent == null) return null;
+  const usedRatio = Math.min(100, Math.max(0, percent)) / 100;
+  return Math.max(0, Math.round(total * (1 - usedRatio)));
 }
 
 function topPanel(title, items, field) {

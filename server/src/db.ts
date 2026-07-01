@@ -40,6 +40,7 @@ export interface Report {
   cpu_model?: string;
   cpu_cores?: number;
   total_memory?: number;
+  available_memory?: number;
   ip_local?: string;
   cpu_percent?: number;
   memory_percent?: number;
@@ -60,6 +61,7 @@ export interface DeviceRow {
   cpu_model: string | null;
   cpu_cores: number | null;
   total_memory: number | null;
+  available_memory: number | null;
   ip_local: string | null;
   ip_public: string | null;
   cpu_percent: number | null;
@@ -77,6 +79,7 @@ export interface DeviceSummaryRow {
   hostname: string | null;
   os_name: string | null;
   os_version: string | null;
+  ip_public: string | null;
   cpu_percent: number | null;
   memory_percent: number | null;
   last_seen: number | null;
@@ -127,6 +130,7 @@ function initSchema(db: Database.Database): void {
       cpu_model        TEXT,
       cpu_cores        INTEGER,
       total_memory     INTEGER,
+      available_memory INTEGER,
       ip_local         TEXT,
       ip_public        TEXT,
       cpu_percent      REAL,
@@ -156,6 +160,19 @@ function initSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_device_latest_last_seen
       ON device_latest(last_seen DESC);
   `);
+  ensureColumn(db, "device_latest", "available_memory", "INTEGER");
+}
+
+function ensureColumn(
+  db: Database.Database,
+  tableName: string,
+  columnName: string,
+  definition: string,
+): void {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as { name: string }[];
+  if (!columns.some((column) => column.name === columnName)) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  }
 }
 
 // ---------- 数据操作 ----------
@@ -167,14 +184,15 @@ export function upsertDevice(r: Report, ipPublic: string): number {
     .prepare(
       `INSERT INTO device_latest
         (device_id, hostname, os_name, os_version, kernel, arch, uptime_seconds,
-         cpu_model, cpu_cores, total_memory, ip_local, ip_public,
+         cpu_model, cpu_cores, total_memory, available_memory, ip_local, ip_public,
          cpu_percent, memory_percent, cpu_top, memory_top, disk, network,
          last_seen, last_history_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, NULL)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, NULL)
        ON CONFLICT(device_id) DO UPDATE SET
          hostname=excluded.hostname, os_name=excluded.os_name, os_version=excluded.os_version,
          kernel=excluded.kernel, arch=excluded.arch, uptime_seconds=excluded.uptime_seconds,
          cpu_model=excluded.cpu_model, cpu_cores=excluded.cpu_cores, total_memory=excluded.total_memory,
+         available_memory=excluded.available_memory,
          ip_local=excluded.ip_local, ip_public=excluded.ip_public,
          cpu_percent=excluded.cpu_percent, memory_percent=excluded.memory_percent,
          cpu_top=excluded.cpu_top, memory_top=excluded.memory_top, disk=excluded.disk, network=excluded.network,
@@ -191,6 +209,7 @@ export function upsertDevice(r: Report, ipPublic: string): number {
       r.cpu_model ?? null,
       r.cpu_cores ?? null,
       r.total_memory ?? null,
+      availableMemory(r),
       r.ip_local ?? null,
       ipPublic,
       r.cpu_percent ?? null,
@@ -202,6 +221,13 @@ export function upsertDevice(r: Report, ipPublic: string): number {
       now,
     );
   return now;
+}
+
+function availableMemory(r: Report): number | null {
+  if (r.available_memory !== undefined) return r.available_memory;
+  if (r.total_memory === undefined || r.memory_percent === undefined) return null;
+  const usedRatio = Math.min(100, Math.max(0, r.memory_percent)) / 100;
+  return Math.max(0, Math.round(r.total_memory * (1 - usedRatio)));
 }
 
 // 读取该设备上次写入历史的时间戳（用于 ~15s 控频）
@@ -240,7 +266,7 @@ export function insertHistory(
 export function listDevices(): DeviceSummaryRow[] {
   return getDb()
     .prepare(
-      `SELECT device_id, hostname, os_name, os_version, cpu_percent, memory_percent, last_seen
+      `SELECT device_id, hostname, os_name, os_version, ip_public, cpu_percent, memory_percent, last_seen
        FROM device_latest
        ORDER BY last_seen DESC`,
     )

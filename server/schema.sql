@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS device_latest (
   cpu_model        TEXT,
   cpu_cores        INTEGER,
   total_memory     INTEGER,
+  available_memory INTEGER,
   ip_local         TEXT,
   ip_public        TEXT,
   cpu_percent      REAL,
