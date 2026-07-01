@@ -15,24 +15,28 @@
 //   cargo build --release --target x86_64-unknown-linux-musl
 
 use futures_util::{SinkExt, StreamExt};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::{
-    env, fs, path::PathBuf, process, time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    env, fs,
+    fs::File,
+    io::{BufRead, BufReader},
+    path::PathBuf,
+    process,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use sysinfo::{
-    CpuRefreshKind, Disks, MemoryRefreshKind, Networks,
-    Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System,
+    CpuRefreshKind, Disks, MemoryRefreshKind, Networks, Pid, ProcessRefreshKind, ProcessesToUpdate,
+    RefreshKind, System,
 };
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::Message,
-};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
 // ---------- 常量 ----------
 const COLLECT_INTERVAL: Duration = Duration::from_millis(500); // 采集频率
 const DEFAULT_SEND_INTERVAL: u64 = 3; // 上报间隔（秒）
 const DEVICE_ID_FILE: &str = "xdash_device_id"; // device_id 持久化文件名
+const STATE_DIR: &str = "/var/lib/xdash";
+const TOP_PROCESSES: usize = 5;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ProcItem {
@@ -82,6 +86,17 @@ struct Report {
     network: Vec<NetItem>,
 }
 
+struct StaticInfo {
+    hostname: String,
+    os_name: String,
+    os_version: String,
+    kernel: String,
+    arch: String,
+    cpu_model: String,
+    cpu_cores: usize,
+    ip_local: String,
+}
+
 // ---------- 配置 ----------
 struct Config {
     url: String,
@@ -105,7 +120,11 @@ impl Config {
             .unwrap_or(DEFAULT_SEND_INTERVAL);
         // 确保上报间隔不小于采集间隔
         let send_interval = send_interval.max(1);
-        Config { url, token, send_interval }
+        Config {
+            url,
+            token,
+            send_interval,
+        }
     }
 
     // 把 token 作为查询参数附加到 ws url
@@ -130,7 +149,8 @@ fn urlencode(s: &str) -> String {
 }
 
 // ---------- device_id 持久化 ----------
-// 存到二进制所在目录或 /tmp 下，首次运行生成 UUID
+// 存到 systemd StateDirectory 对应的 /var/lib/xdash 下，首次运行生成 UUID。
+// 兼容早期版本曾写到二进制同级目录的情况，避免升级后设备 ID 改变。
 fn load_or_create_device_id() -> String {
     let path = device_id_path();
     if let Ok(id) = fs::read_to_string(&path) {
@@ -139,19 +159,51 @@ fn load_or_create_device_id() -> String {
             return id;
         }
     }
+    if let Some(id) = load_legacy_device_id() {
+        if write_device_id(&path, &id).is_ok() {
+            return id;
+        }
+    }
     let id = Uuid::new_v4().to_string();
-    let _ = fs::write(&path, &id);
+    if let Err(e) = write_device_id(&path, &id) {
+        eprintln!(
+            "[{}] 写入 device_id 失败 path={} error={}",
+            now_ts(),
+            path.display(),
+            e
+        );
+    }
     id
 }
 
 fn device_id_path() -> PathBuf {
-    // 优先放在二进制同级目录，回退到 /tmp
+    let state_path = PathBuf::from(STATE_DIR).join(DEVICE_ID_FILE);
+    if fs::create_dir_all(STATE_DIR).is_ok() {
+        return state_path;
+    }
+    PathBuf::from("/tmp").join(DEVICE_ID_FILE)
+}
+
+fn load_legacy_device_id() -> Option<String> {
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
-            return dir.join(DEVICE_ID_FILE);
+            let legacy_path = dir.join(DEVICE_ID_FILE);
+            if let Ok(id) = fs::read_to_string(legacy_path) {
+                let id = id.trim().to_string();
+                if !id.is_empty() {
+                    return Some(id);
+                }
+            }
         }
     }
-    PathBuf::from(format!("/tmp/{}", DEVICE_ID_FILE))
+    None
+}
+
+fn write_device_id(path: &PathBuf, id: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, id)
 }
 
 // ---------- 采集 ----------
@@ -159,6 +211,7 @@ struct Collector {
     sys: System,
     disks: Disks,
     networks: Networks,
+    static_info: StaticInfo,
     last_net: std::collections::HashMap<String, (u64, u64, Instant)>, // name -> (rx, tx, time)
 }
 
@@ -168,38 +221,42 @@ impl Collector {
             RefreshKind::new()
                 .with_cpu(CpuRefreshKind::everything())
                 .with_memory(MemoryRefreshKind::everything())
-                .with_processes(ProcessRefreshKind::everything()),
+                .with_processes(process_refresh_kind()),
         );
-        // 刷新一次以拿到基础信息；进程 CPU% 需两次刷新的差值，故后续每 0.5s 再刷新
+        // 刷新一次以拿到基础信息；进程 CPU% 需两次刷新的差值。
         sys.refresh_cpu_all();
         sys.refresh_memory();
-        sys.refresh_processes(ProcessesToUpdate::All, true);
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh_kind());
         let disks = Disks::new_with_refreshed_list();
         let networks = Networks::new_with_refreshed_list();
+        let static_info = StaticInfo::from_system(&sys);
         Collector {
             sys,
             disks,
             networks,
+            static_info,
             last_net: std::collections::HashMap::new(),
         }
     }
 
-    // 每 0.5s 调用：刷新指标（不返回数据，仅更新内部状态）
+    // 每 0.5s 调用：刷新轻量指标（不返回数据，仅更新内部状态）。
+    // 进程列表和 PSS 读取较重，放到上报前刷新。
     fn tick(&mut self) {
         self.sys.refresh_cpu_all();
         self.sys.refresh_memory();
-        self.sys.refresh_processes(ProcessesToUpdate::All, true);
         self.disks.refresh();
         self.networks.refresh();
     }
 
     // 上报时调用：基于最新内部状态构造一份 Report
     fn build_report(&mut self, device_id: &str) -> Report {
+        self.sys
+            .refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh_kind());
         let sys = &self.sys;
 
         // CPU 总占用：所有核心平均
-        let cpu_percent = sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>()
-            / sys.cpus().len().max(1) as f32;
+        let cpu_percent =
+            sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() / sys.cpus().len().max(1) as f32;
 
         // 内存占用百分比
         let total_mem = sys.total_memory();
@@ -210,45 +267,33 @@ impl Collector {
             0.0
         };
 
-        // CPU 占用前 5 进程
-        let mut cpu_procs: Vec<(Pid, f32)> = sys
-            .processes()
-            .iter()
-            .map(|(pid, p)| (*pid, p.cpu_usage()))
-            .collect();
-        cpu_procs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let cpu_top: Vec<ProcItem> = cpu_procs
-            .iter()
-            .take(5)
-            .filter_map(|(pid, cpu)| {
-                sys.process(*pid).map(|p| ProcItem {
-                    name: p.name().to_string_lossy().into_owned(),
-                    cpu: Some(*cpu),
+        // CPU 占用前 5 进程。只维护 top-N，避免对全部进程排序。
+        let mut cpu_top: Vec<ProcItem> = Vec::with_capacity(TOP_PROCESSES);
+        for process in sys.processes().values() {
+            push_cpu_top(
+                &mut cpu_top,
+                ProcItem {
+                    name: process.name().to_string_lossy().into_owned(),
+                    cpu: Some(process.cpu_usage()),
                     mem: None,
-                })
-            })
-            .collect();
+                },
+            );
+        }
 
         // 内存占用前 5 进程（口径为 PSS：把共享内存按进程数均分，更接近真实占用）。
         // PSS 读自 /proc/[pid]/smaps_rollup（需 root 才能读到全部进程）。
-        // 先为每个进程算出 PSS 再排序，避免先排序后读取造成 top 漂移。
-        let mut mem_procs: Vec<(Pid, u64)> = sys
-            .processes()
-            .keys()
-            .map(|pid| (*pid, read_pss(*pid)))
-            .collect();
-        mem_procs.sort_by(|a, b| b.1.cmp(&a.1));
-        let memory_top: Vec<ProcItem> = mem_procs
-            .iter()
-            .take(5)
-            .filter_map(|(pid, pss)| {
-                sys.process(*pid).map(|p| ProcItem {
-                    name: p.name().to_string_lossy().into_owned(),
+        // 逐进程读取 PSS 并维护 top-N，避免全量 Vec 排序和二次进程表查询。
+        let mut memory_top: Vec<ProcItem> = Vec::with_capacity(TOP_PROCESSES);
+        for (pid, process) in sys.processes() {
+            push_mem_top(
+                &mut memory_top,
+                ProcItem {
+                    name: process.name().to_string_lossy().into_owned(),
                     cpu: None,
-                    mem: Some(*pss),
-                })
-            })
-            .collect();
+                    mem: Some(read_pss(*pid)),
+                },
+            );
+        }
 
         // 硬盘
         let disk: Vec<DiskItem> = self
@@ -295,32 +340,20 @@ impl Collector {
             self.last_net.insert(name.to_string(), (rx, tx, now));
         }
 
-        // CPU 型号（取第一个 CPU 的品牌）
-        let cpu_model = sys
-            .cpus()
-            .first()
-            .map(|c| c.brand().to_string())
-            .unwrap_or_default();
-
-        let hostname = System::host_name().unwrap_or_default();
-        let os_name = System::name().unwrap_or_default();
-        let os_version = System::os_version().unwrap_or_default();
-        let kernel = System::kernel_version().unwrap_or_default();
-        let arch = std::env::consts::ARCH.to_string();
         let uptime_seconds = System::uptime();
 
         Report {
             device_id: device_id.to_string(),
-            hostname,
-            os_name,
-            os_version,
-            kernel,
-            arch,
+            hostname: self.static_info.hostname.clone(),
+            os_name: self.static_info.os_name.clone(),
+            os_version: self.static_info.os_version.clone(),
+            kernel: self.static_info.kernel.clone(),
+            arch: self.static_info.arch.clone(),
             uptime_seconds,
-            cpu_model,
-            cpu_cores: sys.cpus().len(),
+            cpu_model: self.static_info.cpu_model.clone(),
+            cpu_cores: self.static_info.cpu_cores,
             total_memory: total_mem,
-            ip_local: local_ip().unwrap_or_default(),
+            ip_local: self.static_info.ip_local.clone(),
             cpu_percent,
             memory_percent,
             cpu_top,
@@ -331,15 +364,70 @@ impl Collector {
     }
 }
 
+impl StaticInfo {
+    fn from_system(sys: &System) -> Self {
+        let cpu_model = sys
+            .cpus()
+            .first()
+            .map(|c| c.brand().to_string())
+            .unwrap_or_default();
+
+        StaticInfo {
+            hostname: System::host_name().unwrap_or_default(),
+            os_name: System::name().unwrap_or_default(),
+            os_version: System::os_version().unwrap_or_default(),
+            kernel: System::kernel_version().unwrap_or_default(),
+            arch: std::env::consts::ARCH.to_string(),
+            cpu_model,
+            cpu_cores: sys.cpus().len(),
+            ip_local: local_ip().unwrap_or_default(),
+        }
+    }
+}
+
+fn process_refresh_kind() -> ProcessRefreshKind {
+    ProcessRefreshKind::new().with_cpu()
+}
+
+fn push_cpu_top(top: &mut Vec<ProcItem>, item: ProcItem) {
+    let value = item.cpu.unwrap_or(0.0);
+    let pos = top
+        .iter()
+        .position(|p| value > p.cpu.unwrap_or(0.0))
+        .unwrap_or(top.len());
+    if pos < TOP_PROCESSES {
+        top.insert(pos, item);
+        if top.len() > TOP_PROCESSES {
+            top.pop();
+        }
+    } else if top.len() < TOP_PROCESSES {
+        top.push(item);
+    }
+}
+
+fn push_mem_top(top: &mut Vec<ProcItem>, item: ProcItem) {
+    let value = item.mem.unwrap_or(0);
+    let pos = top
+        .iter()
+        .position(|p| value > p.mem.unwrap_or(0))
+        .unwrap_or(top.len());
+    if pos < TOP_PROCESSES {
+        top.insert(pos, item);
+        if top.len() > TOP_PROCESSES {
+            top.pop();
+        }
+    } else if top.len() < TOP_PROCESSES {
+        top.push(item);
+    }
+}
+
 // 读取本机主 IPv4 地址（非回环）
 fn local_ip() -> Option<String> {
     // sysinfo 不直接提供本机 IP，这里用 /proc/net 或 std 尝试建立 UDP 连接获取出口 IP
-    std::net::UdpSocket::bind("0.0.0.0:0")
-        .ok()
-        .and_then(|s| {
-            s.connect("8.8.8.8:80").ok()?;
-            s.local_addr().ok().map(|a| a.ip().to_string())
-        })
+    std::net::UdpSocket::bind("0.0.0.0:0").ok().and_then(|s| {
+        s.connect("8.8.8.8:80").ok()?;
+        s.local_addr().ok().map(|a| a.ip().to_string())
+    })
 }
 
 /// 读取进程的 PSS（Proportional Set Size，字节）。
@@ -349,11 +437,11 @@ fn local_ip() -> Option<String> {
 /// 需 root 才能读到其他用户的进程；读失败（权限/内核无此文件）返回 0。
 fn read_pss(pid: Pid) -> u64 {
     let path = format!("/proc/{}/smaps_rollup", pid.as_u32());
-    let Ok(content) = fs::read_to_string(&path) else {
+    let Ok(file) = File::open(&path) else {
         return 0;
     };
     // 找 "Pss:" 开头的行，格式形如 "Pss:\t\t1100 kB"
-    for line in content.lines() {
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
         if let Some(rest) = line.strip_prefix("Pss:") {
             // 取行中第一个数字（KB）
             if let Some(kb) = rest.split_whitespace().next() {
@@ -375,7 +463,7 @@ fn now_ts() -> u64 {
 }
 
 // ---------- 主循环 ----------
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     // rustls 0.23 需显式安装 CryptoProvider，否则连接 wss:// 时 panic。
     // 必须在任何 TLS 代码之前调用。选 ring 后端（与 Cargo.toml 的 ring feature 对应）。

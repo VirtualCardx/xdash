@@ -3,6 +3,8 @@
 // 启动时自动建表，无需手动执行 schema.sql。
 
 import Database from "better-sqlite3";
+import fs from "node:fs";
+import path from "node:path";
 import { config } from "./config.js";
 
 // ---------- 报文结构（与 Rust 客户端 serde 输出一致）----------
@@ -70,6 +72,16 @@ export interface DeviceRow {
   last_history_at: number | null;
 }
 
+export interface DeviceSummaryRow {
+  device_id: string;
+  hostname: string | null;
+  os_name: string | null;
+  os_version: string | null;
+  cpu_percent: number | null;
+  memory_percent: number | null;
+  last_seen: number | null;
+}
+
 export interface HistoryRow {
   ts: number;
   cpu_percent: number;
@@ -84,11 +96,22 @@ let _db: Database.Database | null = null;
 
 export function getDb(): Database.Database {
   if (_db) return _db;
+  const dbDir = path.dirname(config.dbPath);
+  if (dbDir && dbDir !== ".") {
+    fs.mkdirSync(dbDir, { recursive: true });
+  }
   _db = new Database(config.dbPath);
   _db.pragma("journal_mode = WAL");
+  _db.pragma("synchronous = NORMAL");
   _db.pragma("busy_timeout = 5000");
   initSchema(_db);
   return _db;
+}
+
+export function closeDb(): void {
+  if (!_db) return;
+  _db.close();
+  _db = null;
 }
 
 function initSchema(db: Database.Database): void {
@@ -129,6 +152,9 @@ function initSchema(db: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_history_device_ts
       ON metrics_history(device_id, ts);
+
+    CREATE INDEX IF NOT EXISTS idx_device_latest_last_seen
+      ON device_latest(last_seen DESC);
   `);
 }
 
@@ -211,10 +237,14 @@ export function insertHistory(
     .run(deviceId, ts, cpu, mem, diskPercent, netRx, netTx);
 }
 
-export function listDevices(): DeviceRow[] {
+export function listDevices(): DeviceSummaryRow[] {
   return getDb()
-    .prepare("SELECT * FROM device_latest ORDER BY last_seen DESC")
-    .all() as DeviceRow[];
+    .prepare(
+      `SELECT device_id, hostname, os_name, os_version, cpu_percent, memory_percent, last_seen
+       FROM device_latest
+       ORDER BY last_seen DESC`,
+    )
+    .all() as DeviceSummaryRow[];
 }
 
 export function getDevice(deviceId: string): DeviceRow | null {

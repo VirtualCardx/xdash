@@ -99,6 +99,11 @@ body {
   filter: brightness(1.1);
 }
 
+.login-card button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 /* ---------- 主视图 ---------- */
 .app-view header {
   display: flex;

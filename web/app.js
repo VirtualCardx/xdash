@@ -3,6 +3,7 @@
 const TOKEN_KEY = "xdash_token";
 const POLL_DEVICES = 3000; // 设备列表/详情轮询间隔
 const POLL_HISTORY = 15000; // 历史图表刷新间隔
+const REQUEST_TIMEOUT = 8000;
 
 const $ = (sel) => document.querySelector(sel);
 const token = () => localStorage.getItem(TOKEN_KEY);
@@ -10,12 +11,15 @@ const token = () => localStorage.getItem(TOKEN_KEY);
 let pollTimer = null;
 let historyTimer = null;
 let currentDeviceId = null;
+let devicesLoading = false;
+let detailLoadingDevice = null;
+let historyLoadingKey = null;
 // 历史图表实例（详情页切换时销毁重建）
 const charts = {};
 
 // ---------- 工具 ----------
 async function api(path, { method = "GET", body } = {}) {
-  const res = await fetch(path, {
+  const res = await fetchWithTimeout(path, {
     method,
     headers: {
       "Content-Type": "application/json",
@@ -30,6 +34,16 @@ async function api(path, { method = "GET", body } = {}) {
     throw new Error("未授权");
   }
   return data;
+}
+
+async function fetchWithTimeout(path, options = {}, timeout = REQUEST_TIMEOUT) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    return await fetch(path, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function logout() {
@@ -81,23 +95,33 @@ async function init() {
   $("#login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const password = $("#login-password").value;
+    const submitBtn = $("#login-form button");
+    if (submitBtn.disabled) return;
+    submitBtn.disabled = true;
     $("#login-error").textContent = "";
-    const res = await fetch("/api/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password }),
-    });
-    const data = await res.json();
-    if (res.ok && data.ok) {
-      localStorage.setItem(TOKEN_KEY, data.token);
-      showApp();
-    } else {
-      $("#login-error").textContent = data.error || "登录失败";
+    try {
+      const res = await fetchWithTimeout("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        localStorage.setItem(TOKEN_KEY, data.token);
+        showApp();
+      } else {
+        $("#login-error").textContent = data.error || "登录失败";
+      }
+    } catch {
+      $("#login-error").textContent = "网络超时，请稍后重试";
+    } finally {
+      submitBtn.disabled = false;
     }
   });
 
   $("#logout-btn").addEventListener("click", logout);
   $("#back-btn").addEventListener("click", showDevices);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
 }
 
 function showLogin() {
@@ -117,14 +141,21 @@ function showDevices() {
   $("#detail-view").classList.add("hidden");
   $("#devices-view").classList.remove("hidden");
   stopPolling();
+  destroyCharts();
   loadDevices();
-  pollTimer = setInterval(loadDevices, POLL_DEVICES);
+  startDevicesPolling();
 }
 
 async function loadDevices() {
-  const data = await api("/api/devices").catch(() => null);
-  if (!data || !data.ok) return;
-  renderDevices(data.devices);
+  if (devicesLoading || currentDeviceId) return;
+  devicesLoading = true;
+  try {
+    const data = await api("/api/devices").catch(() => null);
+    if (!data || !data.ok || currentDeviceId) return;
+    renderDevices(data.devices);
+  } finally {
+    devicesLoading = false;
+  }
 }
 
 function renderDevices(devices) {
@@ -164,22 +195,59 @@ function renderDevices(devices) {
 // ---------- 设备详情 ----------
 function openDevice(deviceId) {
   currentDeviceId = deviceId;
+  currentRange = "1h";
   $("#devices-view").classList.add("hidden");
   $("#detail-view").classList.remove("hidden");
   stopPolling();
+  setupDetailShell();
   loadDetail();
-  loadHistory("1h");
-  pollTimer = setInterval(loadDetail, POLL_DEVICES);
-  historyTimer = setInterval(() => loadHistory(currentRange), POLL_HISTORY);
+  loadHistory(currentRange);
+  startDetailPolling();
 }
 
 let currentRange = "1h";
 
+function setupDetailShell() {
+  $("#detail-content").innerHTML = `
+    <div id="detail-live"></div>
+    <div class="charts-block">
+      <div class="charts-head">
+        <h3>历史趋势</h3>
+        <div class="range-btns">
+          <button data-range="1h" class="active">1小时</button>
+          <button data-range="6h">6小时</button>
+          <button data-range="24h">24小时</button>
+        </div>
+      </div>
+      <canvas id="chart-cpu" height="100"></canvas>
+      <canvas id="chart-net" height="100"></canvas>
+    </div>
+  `;
+
+  document.querySelectorAll(".range-btns button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      currentRange = btn.dataset.range;
+      document.querySelectorAll(".range-btns button").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      loadHistory(currentRange);
+    });
+  });
+}
+
 async function loadDetail() {
   if (!currentDeviceId) return;
-  const data = await api(`/api/devices/${encodeURIComponent(currentDeviceId)}`).catch(() => null);
-  if (!data || !data.ok) return;
-  renderDetail(data.device);
+  const deviceId = currentDeviceId;
+  if (detailLoadingDevice === deviceId) return;
+  detailLoadingDevice = deviceId;
+  try {
+    const data = await api(`/api/devices/${encodeURIComponent(deviceId)}`).catch(() => null);
+    if (!data || !data.ok || currentDeviceId !== deviceId) return;
+    renderDetail(data.device);
+  } finally {
+    if (detailLoadingDevice === deviceId) {
+      detailLoadingDevice = null;
+    }
+  }
 }
 
 function renderDetail(d) {
@@ -189,7 +257,7 @@ function renderDetail(d) {
     ? '<span class="badge online">在线</span>'
     : '<span class="badge offline">离线</span>';
 
-  $("#detail-content").innerHTML = `
+  $("#detail-live").innerHTML = `
     <div class="detail-head">
       <h2>${escapeHtml(d.hostname || d.device_id)} ${status}</h2>
       <div class="info-grid">
@@ -228,35 +296,8 @@ function renderDetail(d) {
       <h3>网络</h3>
       ${netTable(d.network)}
     </div>
-
-    <div class="charts-block">
-      <div class="charts-head">
-        <h3>历史趋势</h3>
-        <div class="range-btns">
-          <button data-range="1h" class="${currentRange === "1h" ? "active" : ""}">1小时</button>
-          <button data-range="6h" class="${currentRange === "6h" ? "active" : ""}">6小时</button>
-          <button data-range="24h" class="${currentRange === "24h" ? "active" : ""}">24小时</button>
-        </div>
-      </div>
-      <canvas id="chart-cpu" height="100"></canvas>
-      <canvas id="chart-net" height="100"></canvas>
-    </div>
     <p class="updated">最后更新：${fmtAgo(d.last_seen)}</p>
   `;
-
-  // 绑定区间按钮
-  document.querySelectorAll(".range-btns button").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      currentRange = btn.dataset.range;
-      document.querySelectorAll(".range-btns button").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      loadHistory(currentRange);
-    });
-  });
-
-  // 销毁旧图表，按新数据重建
-  Object.values(charts).forEach((c) => c && c.destroy());
-  loadHistory(currentRange);
 }
 
 function topPanel(title, items, field) {
@@ -294,10 +335,20 @@ function netTable(network) {
 // ---------- 历史图表 ----------
 async function loadHistory(range) {
   if (!currentDeviceId) return;
+  const deviceId = currentDeviceId;
+  const requestKey = `${deviceId}:${range}`;
+  if (historyLoadingKey === requestKey) return;
   currentRange = range;
-  const data = await api(`/api/devices/${encodeURIComponent(currentDeviceId)}/history?range=${range}`).catch(() => null);
-  if (!data || !data.ok) return;
-  drawCharts(data.points);
+  historyLoadingKey = requestKey;
+  try {
+    const data = await api(`/api/devices/${encodeURIComponent(deviceId)}/history?range=${range}`).catch(() => null);
+    if (!data || !data.ok || currentDeviceId !== deviceId || currentRange !== range) return;
+    drawCharts(data.points);
+  } finally {
+    if (historyLoadingKey === requestKey) {
+      historyLoadingKey = null;
+    }
+  }
 }
 
 function drawCharts(points) {
@@ -307,32 +358,30 @@ function drawCharts(points) {
   const rxData = points.map((p) => p.net_rx);
   const txData = points.map((p) => p.net_tx);
 
-  charts.cpu?.destroy();
-  charts.net?.destroy();
+  charts.cpu = updateLineChart(charts.cpu, $("#chart-cpu"), labels, [
+    { label: "CPU %", data: cpuData, borderColor: "#3b82f6", tension: 0.3, fill: false },
+    { label: "内存 %", data: memData, borderColor: "#10b981", tension: 0.3, fill: false },
+  ]);
 
-  charts.cpu = new Chart($("#chart-cpu"), {
-    type: "line",
-    data: {
-      labels,
-      datasets: [
-        { label: "CPU %", data: cpuData, borderColor: "#3b82f6", tension: 0.3, fill: false },
-        { label: "内存 %", data: memData, borderColor: "#10b981", tension: 0.3, fill: false },
-      ],
-    },
-    options: { responsive: true, animation: false, plugins: { legend: { labels: { color: "#cbd5e1" } } }, scales: gridStyle() },
-  });
+  charts.net = updateLineChart(charts.net, $("#chart-net"), labels, [
+    { label: "下行 B/s", data: rxData, borderColor: "#f59e0b", tension: 0.3, fill: false },
+    { label: "上行 B/s", data: txData, borderColor: "#ef4444", tension: 0.3, fill: false },
+  ]);
+}
 
-  charts.net = new Chart($("#chart-net"), {
-    type: "line",
-    data: {
-      labels,
-      datasets: [
-        { label: "下行 B/s", data: rxData, borderColor: "#f59e0b", tension: 0.3, fill: false },
-        { label: "上行 B/s", data: txData, borderColor: "#ef4444", tension: 0.3, fill: false },
-      ],
-    },
-    options: { responsive: true, animation: false, plugins: { legend: { labels: { color: "#cbd5e1" } } }, scales: gridStyle() },
-  });
+function updateLineChart(chart, canvas, labels, datasets) {
+  if (!canvas) return chart;
+  if (!chart) {
+    return new Chart(canvas, {
+      type: "line",
+      data: { labels, datasets },
+      options: { responsive: true, animation: false, plugins: { legend: { labels: { color: "#cbd5e1" } } }, scales: gridStyle() },
+    });
+  }
+  chart.data.labels = labels;
+  chart.data.datasets = datasets;
+  chart.update("none");
+  return chart;
 }
 
 function gridStyle() {
@@ -342,11 +391,44 @@ function gridStyle() {
 }
 
 // ---------- 轮询控制 ----------
+function startDevicesPolling() {
+  if (document.hidden) return;
+  pollTimer = setInterval(loadDevices, POLL_DEVICES);
+}
+
+function startDetailPolling() {
+  if (document.hidden) return;
+  pollTimer = setInterval(loadDetail, POLL_DEVICES);
+  historyTimer = setInterval(() => loadHistory(currentRange), POLL_HISTORY);
+}
+
 function stopPolling() {
   if (pollTimer) clearInterval(pollTimer);
   if (historyTimer) clearInterval(historyTimer);
   pollTimer = null;
   historyTimer = null;
+}
+
+function handleVisibilityChange() {
+  if (!token()) return;
+  if (document.hidden) {
+    stopPolling();
+    return;
+  }
+  if (currentDeviceId) {
+    loadDetail();
+    loadHistory(currentRange);
+    startDetailPolling();
+  } else if (!$("#app-view").classList.contains("hidden")) {
+    loadDevices();
+    startDevicesPolling();
+  }
+}
+
+function destroyCharts() {
+  Object.values(charts).forEach((c) => c && c.destroy());
+  charts.cpu = null;
+  charts.net = null;
 }
 
 function escapeHtml(s) {

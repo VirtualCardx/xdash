@@ -42,6 +42,8 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+# 持久化设备 ID，systemd 会创建 /var/lib/xdash 并允许服务写入
+StateDirectory=xdash
 # 注意：读取系统指标/proc 需要保留相应访问，不要加过严的 proc 限制
 # 需要读 /proc/[pid]/smaps_rollup，故不设 PrivateDevices/ProcSubset
 

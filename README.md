@@ -51,7 +51,7 @@ xdash/
 │   ├── schema.sql       建表脚本（启动时自动建表，此文件仅参考）
 │   ├── .env.example     环境变量模板
 │   ├── xdash-server.service
-│   ├── data/            SQLite 数据文件目录
+│   ├── data/            SQLite 数据文件目录（开发默认；systemd 模板使用 /var/lib/xdash）
 │   └── src/
 │       ├── index.ts     Express 入口
 │       ├── config.ts    环境变量配置
@@ -109,9 +109,17 @@ npm start          # node dist/index.js
 
 默认监听 `http://localhost:3000`。这就是网页地址，客户端 `XDASH_URL` 指向 `ws(s)://<服务端IP>:3000/ws`。
 
+健康检查：
+```bash
+curl http://localhost:3000/api/health
+```
+返回 `{"ok":true,"status":"ok",...}` 表示 HTTP 服务和 SQLite 均可用。
+
 ### 4. （推荐）配置为 systemd 服务
 
 把 `server/xdash-server.service` 拷到 `/etc/systemd/system/`，按其中注释调整路径（默认项目在 `/opt/xdash`），然后：
+
+> systemd 模板默认把 SQLite 放在 `/var/lib/xdash/xdash.db`，由 systemd 自动创建并授权；本地开发仍可继续使用 `.env` 中的 `DB_PATH=./data/xdash.db`。
 
 ```bash
 sudo systemctl daemon-reload

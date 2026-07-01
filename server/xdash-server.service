@@ -29,9 +29,10 @@ ExecStart=/usr/bin/node dist/index.js
 # 环境变量（也可在此覆盖 .env 中的值）
 Environment=NODE_ENV=production
 Environment=PORT=3000
+Environment=DB_PATH=/var/lib/xdash/xdash.db
 # Environment=TRUST_PROXY=true
 
-# 运行身份（注意：需要能写入 data/ 目录的权限）
+# 运行身份
 User=www-data
 Group=www-data
 
@@ -44,8 +45,8 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-# 允许写入 data/（SQLite 数据文件）
-ReadWritePaths=/opt/xdash/server/data
+# 持久化 SQLite 数据库，systemd 会创建 /var/lib/xdash 并授权给服务用户
+StateDirectory=xdash
 
 [Install]
 WantedBy=multi-user.target

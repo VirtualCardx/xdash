@@ -12,8 +12,18 @@ function required(key: string): string {
   return v;
 }
 
+function numberEnv(key: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[key];
+  const value = raw === undefined ? fallback : Number(raw);
+  if (!Number.isFinite(value) || value < min || value > max) {
+    console.error(`错误：环境变量 ${key} 必须是 ${min} 到 ${max} 之间的数字`);
+    process.exit(1);
+  }
+  return value;
+}
+
 export const config = {
-  port: Number(process.env.PORT ?? 3000),
+  port: numberEnv("PORT", 3000, 1, 65535),
   // 客户端握手 token（必须与 Rust 客户端 XDASH_TOKEN 一致）
   deviceToken: required("DEVICE_TOKEN"),
   // 网页登录密码
@@ -25,7 +35,7 @@ export const config = {
   // 静态网页资源目录
   webDir: process.env.WEB_DIR ?? "../web",
   // 历史数据保留天数（默认 7）
-  historyDays: Number(process.env.HISTORY_DAYS ?? 7),
+  historyDays: numberEnv("HISTORY_DAYS", 7, 1, 3650),
   // 是否信任反向代理（nginx 等设为 true，以读取真实公网 IP）
   trustProxy: process.env.TRUST_PROXY === "true",
 };
