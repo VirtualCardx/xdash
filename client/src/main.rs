@@ -224,7 +224,7 @@ impl Collector {
                 .with_memory(MemoryRefreshKind::everything())
                 .with_processes(process_refresh_kind()),
         );
-        // 刷新一次以拿到基础信息；进程 CPU% 需两次刷新的差值。
+        // 刷新一次以拿到基础信息；CPU% 需两次刷新的差值。
         sys.refresh_cpu_all();
         sys.refresh_memory();
         sys.refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh_kind());
@@ -240,10 +240,9 @@ impl Collector {
         }
     }
 
-    // 每 0.5s 调用：刷新轻量指标（不返回数据，仅更新内部状态）。
-    // 进程列表和 PSS 读取较重，放到上报前刷新。
+    // 每 0.5s 调用：刷新轻量且与瞬时速率相关的指标（不返回数据）。
+    // CPU 和进程 CPU 放到上报前一起刷新，保证两者使用同一采样窗口。
     fn tick(&mut self) {
-        self.sys.refresh_cpu_all();
         self.sys.refresh_memory();
         self.disks.refresh();
         self.networks.refresh();
@@ -251,6 +250,7 @@ impl Collector {
 
     // 上报时调用：基于最新内部状态构造一份 Report
     fn build_report(&mut self, device_id: &str) -> Report {
+        self.sys.refresh_cpu_all();
         self.sys
             .refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh_kind());
         let sys = &self.sys;
