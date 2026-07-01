@@ -12,6 +12,9 @@ tokio = { version = "1", features = ["full"] }
 # 适合 musl 静态交叉编译。webpki-roots 把 Mozilla 根证书内置进二进制，
 # 连 wss:// 也不依赖系统的 /etc/ssl/certs。
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# rustls 0.23 不再自动选 CryptoProvider，必须显式启用一个后端。
+# 选 ring：成熟稳定、musl 友好（无 C 依赖）。代码里也会 install_default() 兜底。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

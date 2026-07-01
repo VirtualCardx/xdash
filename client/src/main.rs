@@ -377,6 +377,12 @@ fn now_ts() -> u64 {
 // ---------- 主循环 ----------
 #[tokio::main]
 async fn main() {
+    // rustls 0.23 需显式安装 CryptoProvider，否则连接 wss:// 时 panic。
+    // 必须在任何 TLS 代码之前调用。选 ring 后端（与 Cargo.toml 的 ring feature 对应）。
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("安装 rustls ring provider 失败");
+
     let config = Config::from_env();
     let device_id = load_or_create_device_id();
     let send_interval = Duration::from_secs(config.send_interval);
