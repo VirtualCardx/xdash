@@ -500,7 +500,8 @@ fn read_cpu_sample() -> Option<CpuSample> {
         return None;
     }
 
-    let total = values.iter().copied().sum();
+    // /proc/stat 的 guest/guest_nice 通常已计入 user/nice，total 只取前 8 项避免重复计入。
+    let total = values.iter().take(8).copied().sum();
     let busy = values.first().copied().unwrap_or(0)
         + values.get(1).copied().unwrap_or(0)
         + values.get(2).copied().unwrap_or(0)
@@ -535,15 +536,40 @@ fn read_proc_cpu_snapshot(pid: u32) -> Option<ProcCpuSnapshot> {
     let lparen = stat.find('(')?;
     let rparen = stat.rfind(')')?;
     let name = stat.get(lparen + 1..rparen)?.to_string();
+    let cpu_time = read_proc_task_cpu_time(pid).or_else(|| parse_stat_cpu_time(&stat))?;
+    Some(ProcCpuSnapshot {
+        pid,
+        name,
+        cpu_time,
+    })
+}
+
+fn read_proc_task_cpu_time(pid: u32) -> Option<u64> {
+    let entries = fs::read_dir(format!("/proc/{}/task", pid)).ok()?;
+    let mut total = 0u64;
+    let mut found = false;
+    for entry in entries.filter_map(Result::ok) {
+        let Ok(tid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = fs::read_to_string(format!("/proc/{}/task/{}/stat", pid, tid)) else {
+            continue;
+        };
+        if let Some(cpu_time) = parse_stat_cpu_time(&stat) {
+            total = total.saturating_add(cpu_time);
+            found = true;
+        }
+    }
+    found.then_some(total)
+}
+
+fn parse_stat_cpu_time(stat: &str) -> Option<u64> {
+    let rparen = stat.rfind(')')?;
     let fields = stat.get(rparen + 2..)?;
     let parts: Vec<&str> = fields.split_whitespace().collect();
     let utime = parts.get(11)?.parse::<u64>().ok()?;
     let stime = parts.get(12)?.parse::<u64>().ok()?;
-    Some(ProcCpuSnapshot {
-        pid,
-        name,
-        cpu_time: utime.saturating_add(stime),
-    })
+    Some(utime.saturating_add(stime))
 }
 
 // 读取本机主 IPv4 地址（非回环）
