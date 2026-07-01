@@ -17,6 +17,7 @@
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     env, fs,
     fs::File,
     io::{BufRead, BufReader},
@@ -96,6 +97,12 @@ struct StaticInfo {
     cpu_model: String,
     cpu_cores: usize,
     ip_local: String,
+}
+
+#[derive(Clone, Copy)]
+struct CpuSample {
+    total: u64,
+    busy: u64,
 }
 
 // ---------- 配置 ----------
@@ -213,7 +220,9 @@ struct Collector {
     disks: Disks,
     networks: Networks,
     static_info: StaticInfo,
-    last_net: std::collections::HashMap<String, (u64, u64, Instant)>, // name -> (rx, tx, time)
+    last_cpu_sample: Option<CpuSample>,
+    last_proc_cpu: HashMap<Pid, u64>, // pid -> utime + stime
+    last_net: HashMap<String, (u64, u64, Instant)>, // name -> (rx, tx, time)
 }
 
 impl Collector {
@@ -231,17 +240,21 @@ impl Collector {
         let disks = Disks::new_with_refreshed_list();
         let networks = Networks::new_with_refreshed_list();
         let static_info = StaticInfo::from_system(&sys);
+        let last_cpu_sample = read_cpu_sample();
+        let last_proc_cpu = read_process_cpu_times(sys.processes().keys().copied());
         Collector {
             sys,
             disks,
             networks,
             static_info,
-            last_net: std::collections::HashMap::new(),
+            last_cpu_sample,
+            last_proc_cpu,
+            last_net: HashMap::new(),
         }
     }
 
     // 每 0.5s 调用：刷新轻量且与瞬时速率相关的指标（不返回数据）。
-    // CPU 和进程 CPU 放到上报前一起刷新，保证两者使用同一采样窗口。
+    // CPU 和进程 CPU 由 /proc jiffies 在上报前统一计算，保证两者同一分母。
     fn tick(&mut self) {
         self.sys.refresh_memory();
         self.disks.refresh();
@@ -250,14 +263,22 @@ impl Collector {
 
     // 上报时调用：基于最新内部状态构造一份 Report
     fn build_report(&mut self, device_id: &str) -> Report {
-        self.sys.refresh_cpu_all();
         self.sys
             .refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh_kind());
         let sys = &self.sys;
 
-        // CPU 总占用：所有核心平均。进程 CPU 也会除以核心数，保持同一整机口径。
-        let cpu_cores = sys.cpus().len().max(1) as f32;
-        let cpu_percent = sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() / cpu_cores;
+        // CPU 总占用和进程 CPU 均基于同一轮 /proc jiffies 差值，口径为整机 0-100%。
+        let cpu_sample = read_cpu_sample();
+        let total_delta = match (self.last_cpu_sample, cpu_sample) {
+            (Some(prev), Some(curr)) => curr.total.saturating_sub(prev.total),
+            _ => 0,
+        };
+        let cpu_percent = match (self.last_cpu_sample, cpu_sample) {
+            (Some(prev), Some(curr)) if total_delta > 0 => {
+                curr.busy.saturating_sub(prev.busy) as f32 / total_delta as f32 * 100.0
+            }
+            _ => 0.0,
+        };
 
         // 内存占用百分比
         let total_mem = sys.total_memory();
@@ -271,12 +292,27 @@ impl Collector {
 
         // CPU 占用前 5 进程。只维护 top-N，避免对全部进程排序。
         let mut cpu_top: Vec<ProcItem> = Vec::with_capacity(TOP_PROCESSES);
-        for process in sys.processes().values() {
+        let mut proc_cpu = HashMap::with_capacity(sys.processes().len());
+        for (pid, process) in sys.processes() {
+            let Some(curr_proc_time) = read_proc_cpu_time(*pid) else {
+                continue;
+            };
+            proc_cpu.insert(*pid, curr_proc_time);
+            let process_percent = if total_delta > 0 {
+                self.last_proc_cpu
+                    .get(pid)
+                    .map(|prev| {
+                        curr_proc_time.saturating_sub(*prev) as f32 / total_delta as f32 * 100.0
+                    })
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
             push_cpu_top(
                 &mut cpu_top,
                 ProcItem {
                     name: process.name().to_string_lossy().into_owned(),
-                    cpu: Some(process.cpu_usage() / cpu_cores),
+                    cpu: Some(process_percent),
                     mem: None,
                 },
             );
@@ -344,7 +380,7 @@ impl Collector {
 
         let uptime_seconds = System::uptime();
 
-        Report {
+        let report = Report {
             device_id: device_id.to_string(),
             hostname: self.static_info.hostname.clone(),
             os_name: self.static_info.os_name.clone(),
@@ -363,7 +399,12 @@ impl Collector {
             memory_top,
             disk,
             network: net_items,
-        }
+        };
+
+        self.last_cpu_sample = cpu_sample;
+        self.last_proc_cpu = proc_cpu;
+
+        report
     }
 }
 
@@ -389,7 +430,7 @@ impl StaticInfo {
 }
 
 fn process_refresh_kind() -> ProcessRefreshKind {
-    ProcessRefreshKind::new().with_cpu()
+    ProcessRefreshKind::new()
 }
 
 fn push_cpu_top(top: &mut Vec<ProcItem>, item: ProcItem) {
@@ -422,6 +463,49 @@ fn push_mem_top(top: &mut Vec<ProcItem>, item: ProcItem) {
     } else if top.len() < TOP_PROCESSES {
         top.push(item);
     }
+}
+
+fn read_cpu_sample() -> Option<CpuSample> {
+    let content = fs::read_to_string("/proc/stat").ok()?;
+    let line = content.lines().find(|line| line.starts_with("cpu "))?;
+    let values: Vec<u64> = line
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|value| value.parse::<u64>().ok())
+        .collect();
+    if values.len() < 4 {
+        return None;
+    }
+
+    let total = values.iter().copied().sum();
+    let busy = values.first().copied().unwrap_or(0)
+        + values.get(1).copied().unwrap_or(0)
+        + values.get(2).copied().unwrap_or(0)
+        + values.get(5).copied().unwrap_or(0)
+        + values.get(6).copied().unwrap_or(0)
+        + values.get(7).copied().unwrap_or(0);
+
+    Some(CpuSample { total, busy })
+}
+
+fn read_process_cpu_times(pids: impl Iterator<Item = Pid>) -> HashMap<Pid, u64> {
+    let mut times = HashMap::new();
+    for pid in pids {
+        if let Some(cpu_time) = read_proc_cpu_time(pid) {
+            times.insert(pid, cpu_time);
+        }
+    }
+    times
+}
+
+fn read_proc_cpu_time(pid: Pid) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{}/stat", pid.as_u32())).ok()?;
+    let rparen = stat.rfind(')')?;
+    let fields = stat.get(rparen + 2..)?;
+    let parts: Vec<&str> = fields.split_whitespace().collect();
+    let utime = parts.get(11)?.parse::<u64>().ok()?;
+    let stime = parts.get(12)?.parse::<u64>().ok()?;
+    Some(utime.saturating_add(stime))
 }
 
 // 读取本机主 IPv4 地址（非回环）
