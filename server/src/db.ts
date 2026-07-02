@@ -70,6 +70,7 @@ export interface DeviceRow {
   memory_top: string | null;
   disk: string | null;
   network: string | null;
+  first_seen: number | null;
   last_seen: number | null;
   last_history_at: number | null;
 }
@@ -82,6 +83,7 @@ export interface DeviceSummaryRow {
   ip_public: string | null;
   cpu_percent: number | null;
   memory_percent: number | null;
+  first_seen: number | null;
   last_seen: number | null;
 }
 
@@ -139,6 +141,7 @@ function initSchema(db: Database.Database): void {
       memory_top       TEXT,
       disk             TEXT,
       network          TEXT,
+      first_seen       INTEGER,
       last_seen        INTEGER,
       last_history_at  INTEGER
     );
@@ -161,6 +164,9 @@ function initSchema(db: Database.Database): void {
       ON device_latest(last_seen DESC);
   `);
   ensureColumn(db, "device_latest", "available_memory", "INTEGER");
+  ensureColumn(db, "device_latest", "first_seen", "INTEGER");
+  db.exec("UPDATE device_latest SET first_seen = COALESCE(last_seen, strftime('%s','now')) WHERE first_seen IS NULL");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_device_latest_first_seen ON device_latest(first_seen ASC)");
 }
 
 function ensureColumn(
@@ -186,8 +192,8 @@ export function upsertDevice(r: Report, ipPublic: string): number {
         (device_id, hostname, os_name, os_version, kernel, arch, uptime_seconds,
          cpu_model, cpu_cores, total_memory, available_memory, ip_local, ip_public,
          cpu_percent, memory_percent, cpu_top, memory_top, disk, network,
-         last_seen, last_history_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, NULL)
+         first_seen, last_seen, last_history_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, NULL)
        ON CONFLICT(device_id) DO UPDATE SET
          hostname=excluded.hostname, os_name=excluded.os_name, os_version=excluded.os_version,
          kernel=excluded.kernel, arch=excluded.arch, uptime_seconds=excluded.uptime_seconds,
@@ -218,6 +224,7 @@ export function upsertDevice(r: Report, ipPublic: string): number {
       r.memory_top ? JSON.stringify(r.memory_top) : null,
       r.disk ? JSON.stringify(r.disk) : null,
       r.network ? JSON.stringify(r.network) : null,
+      now,
       now,
     );
   return now;
@@ -266,9 +273,9 @@ export function insertHistory(
 export function listDevices(): DeviceSummaryRow[] {
   return getDb()
     .prepare(
-      `SELECT device_id, hostname, os_name, os_version, ip_public, cpu_percent, memory_percent, last_seen
+      `SELECT device_id, hostname, os_name, os_version, ip_public, cpu_percent, memory_percent, first_seen, last_seen
        FROM device_latest
-       ORDER BY last_seen DESC`,
+       ORDER BY first_seen ASC, device_id ASC`,
     )
     .all() as DeviceSummaryRow[];
 }

@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS device_latest (
   memory_top       TEXT,   -- JSON 字符串: [{"name","mem"}]，mem 为 PSS(字节)
   disk             TEXT,   -- JSON 字符串: [{"mount","used","total","percent"}]
   network          TEXT,   -- JSON 字符串: [{"name","rx_rate","tx_rate"}]
+  first_seen       INTEGER,
   last_seen        INTEGER,
   last_history_at  INTEGER
 );
@@ -41,3 +42,4 @@ CREATE TABLE IF NOT EXISTS metrics_history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_history_device_ts ON metrics_history(device_id, ts);
+CREATE INDEX IF NOT EXISTS idx_device_latest_first_seen ON device_latest(first_seen ASC);
