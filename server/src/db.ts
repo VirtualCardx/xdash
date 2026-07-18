@@ -301,3 +301,37 @@ export function getHistory(deviceId: string, sinceTs: number): HistoryRow[] {
 export function deleteHistoryBefore(cutoffTs: number): void {
   getDb().prepare("DELETE FROM metrics_history WHERE ts < ?").run(cutoffTs);
 }
+
+// 删除单个设备的全部数据（实时表 + 历史表）。事务保证原子性。
+// 返回是否真的删除了设备（false 表示设备本就不存在）。
+export function deleteDevice(deviceId: string): boolean {
+  const db = getDb();
+  const existed = db.prepare("SELECT 1 FROM device_latest WHERE device_id = ?").get(deviceId);
+  if (!existed) return false;
+  const txn = db.transaction(() => {
+    db.prepare("DELETE FROM device_latest WHERE device_id = ?").run(deviceId);
+    db.prepare("DELETE FROM metrics_history WHERE device_id = ?").run(deviceId);
+  });
+  txn();
+  return true;
+}
+
+// 删除所有当前离线设备（last_seen 距今超过阈值）。
+// 返回被删除的设备 id 列表（供调用方同步清理内存映射 / 前端提示）。
+export function deleteOfflineDevices(onlineThresholdSec: number): string[] {
+  const db = getDb();
+  const cutoff = Math.floor(Date.now() / 1000) - onlineThresholdSec;
+  // 先查出待删 id（last_seen 为 NULL 或早于 cutoff 的视为离线）
+  const rows = db
+    .prepare("SELECT device_id FROM device_latest WHERE last_seen IS NULL OR last_seen < ?")
+    .all(cutoff) as { device_id: string }[];
+  const ids = rows.map((r) => r.device_id);
+  if (ids.length === 0) return ids;
+  const placeholders = ids.map(() => "?").join(",");
+  const txn = db.transaction(() => {
+    db.prepare(`DELETE FROM device_latest WHERE device_id IN (${placeholders})`).run(...ids);
+    db.prepare(`DELETE FROM metrics_history WHERE device_id IN (${placeholders})`).run(...ids);
+  });
+  txn();
+  return ids;
+}

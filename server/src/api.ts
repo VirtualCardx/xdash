@@ -7,6 +7,8 @@ import {
   listDevices,
   getDevice,
   getHistory,
+  deleteDevice,
+  deleteOfflineDevices,
   type DeviceRow,
   type DeviceSummaryRow,
 } from "./db.js";
@@ -16,6 +18,7 @@ import {
   verifySessionToken,
   extractBearer,
 } from "./auth.js";
+import { forgetDevices } from "./ws.js";
 
 const ONLINE_THRESHOLD = 15; // 15s 内有上报视为在线
 const LOGIN_WINDOW_MS = 10 * 60 * 1000;
@@ -90,6 +93,25 @@ apiRouter.get("/devices/:id/history", (req: Request, res: Response) => {
   const since = Math.floor(Date.now() / 1000) - hours * 3600;
   const points = getHistory(decodeURIComponent(req.params.id), since);
   res.json({ ok: true, range, points });
+});
+
+// 删除单个设备（实时表 + 历史表，不限在线状态）
+apiRouter.delete("/devices/:id", (req: Request, res: Response) => {
+  const deviceId = decodeURIComponent(req.params.id);
+  const removed = deleteDevice(deviceId);
+  if (!removed) {
+    res.status(404).json({ ok: false, error: "设备不存在" });
+    return;
+  }
+  forgetDevices([deviceId]);
+  res.json({ ok: true, deleted: [deviceId] });
+});
+
+// 删除所有当前离线设备
+apiRouter.delete("/devices", (_req: Request, res: Response) => {
+  const ids = deleteOfflineDevices(ONLINE_THRESHOLD);
+  if (ids.length > 0) forgetDevices(ids);
+  res.json({ ok: true, deleted: ids, count: ids.length });
 });
 
 // ---------- 中间件/工具 ----------

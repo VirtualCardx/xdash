@@ -122,6 +122,23 @@ async function init() {
   $("#logout-btn").addEventListener("click", logout);
   $("#back-btn").addEventListener("click", showDevices);
   document.addEventListener("visibilitychange", handleVisibilityChange);
+  $("#cleanup-offline-btn").addEventListener("click", cleanupOfflineDevices);
+}
+
+// 清理所有当前离线设备
+async function cleanupOfflineDevices() {
+  if (!confirm("确定清理所有当前离线的设备吗？\n这些设备的实时数据和历史记录将被永久清除。")) return;
+  const btn = $("#cleanup-offline-btn");
+  btn.disabled = true;
+  const data = await api("/api/devices", { method: "DELETE" }).catch(() => null);
+  btn.disabled = false;
+  if (data && data.ok) {
+    const n = data.count ?? 0;
+    alert(n > 0 ? `已清理 ${n} 个离线设备` : "当前没有离线设备");
+    loadDevices();
+  } else {
+    alert(data?.error || "清理失败");
+  }
 }
 
 function showLogin() {
@@ -160,6 +177,11 @@ async function loadDevices() {
 
 function renderDevices(devices) {
   const grid = $("#devices-grid");
+  const toolbar = $("#devices-toolbar");
+  const offlineCount = devices.filter((d) => !d.online).length;
+  // 仅当存在离线设备时显示「清理所有离线」工具栏
+  toolbar.classList.toggle("hidden", offlineCount === 0);
+
   if (!devices.length) {
     grid.innerHTML = '<p class="empty">暂无设备上报数据。请确认客户端已运行。</p>';
     return;
@@ -171,8 +193,12 @@ function renderDevices(devices) {
         : '<span class="badge offline">离线</span>';
       const cpu = d.cpu_percent ?? 0;
       const mem = d.memory_percent ?? 0;
+      // 离线设备显示删除按钮（在线设备不允许从列表删，避免误删临时断线）
+      const delBtn = d.online
+        ? ""
+        : `<button class="card-del-btn" data-id="${escapeHtml(d.device_id)}" data-name="${escapeHtml(d.hostname || d.device_id)}" title="删除该设备">删除</button>`;
       return `
-        <div class="device-card" data-id="${d.device_id}">
+        <div class="device-card" data-id="${escapeHtml(d.device_id)}">
           <div class="card-head">
             <strong>${escapeHtml(d.hostname || d.device_id)}</strong>
             ${status}
@@ -183,13 +209,31 @@ function renderDevices(devices) {
             <div class="metric"><span class="label">CPU</span><span class="value">${cpu.toFixed(1)}%</span></div>
             <div class="metric"><span class="label">内存</span><span class="value">${mem.toFixed(1)}%</span></div>
           </div>
-          <div class="card-foot">更新：${fmtAgo(d.last_seen)}</div>
+          <div class="card-foot">
+            <span>更新：${fmtAgo(d.last_seen)}</span>
+            ${delBtn}
+          </div>
         </div>`;
     })
     .join("");
 
   grid.querySelectorAll(".device-card").forEach((card) => {
     card.addEventListener("click", () => openDevice(card.dataset.id));
+  });
+  // 删除按钮：阻止冒泡到卡片点击，避免误进详情
+  grid.querySelectorAll(".card-del-btn").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      const name = btn.dataset.name;
+      if (!confirm(`确定删除设备「${name}」吗？\n该设备的实时数据和历史记录将被永久清除。`)) return;
+      const data = await api(`/api/devices/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => null);
+      if (data && data.ok) {
+        loadDevices();
+      } else {
+        alert(data?.error || "删除失败");
+      }
+    });
   });
 }
 

@@ -244,5 +244,13 @@ function aggregateNet(report: Report): { netRx: number; netTx: number } {
   );
 }
 
+// 删除设备后调用：从内存节流映射中移除对应记录，避免幽灵条目残留。
+// 由 api.ts 的删除端点在成功删库后调用。
+export function forgetDevices(ids: string[]): void {
+  for (const id of ids) {
+    lastWriteMap.delete(id);
+  }
+}
+
 // 标记 ws 在编译期被引用，避免未使用类型导入告警（WebSocket 用于未来扩展广播）
 export type { WebSocket };
