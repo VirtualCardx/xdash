@@ -51,6 +51,19 @@ function logout() {
   location.reload();
 }
 
+// 按百分比返回负载等级：>=80% crit(红)，>=50% warn(琥珀)，否则正常(绿)
+function loadClass(pct) {
+  if (pct >= 80) return "crit";
+  if (pct >= 50) return "warn";
+  return "";
+}
+
+// ASCII 进度条：用 █ ░ 拼 10 格，配合 CSS 变色
+function asciiBar(pct, width = 10) {
+  const filled = Math.round((pct / 100) * width);
+  return "█".repeat(filled) + "░".repeat(width - filled);
+}
+
 function fmtBytes(n) {
   if (n == null) return "-";
   const u = ["B", "KB", "MB", "GB", "TB"];
@@ -178,25 +191,34 @@ async function loadDevices() {
 function renderDevices(devices) {
   const grid = $("#devices-grid");
   const toolbar = $("#devices-toolbar");
-  const offlineCount = devices.filter((d) => !d.online).length;
-  // 仅当存在离线设备时显示「清理所有离线」工具栏
-  toolbar.classList.toggle("hidden", offlineCount === 0);
+  const nodeCount = $("#node-count");
+  const onlineCount = devices.filter((d) => d.online).length;
+  const offlineCount = devices.length - onlineCount;
+  // 工具栏始终显示（含节点统计），仅当有离线设备时才显示清理按钮
+  toolbar.classList.toggle("hidden", devices.length === 0);
+  if (devices.length) {
+    nodeCount.textContent = `${devices.length} nodes · ${onlineCount} online${offlineCount ? ` · ${offlineCount} offline` : ""}`;
+  }
+  // 清理按钮的显隐独立控制
+  $("#cleanup-offline-btn").style.display = offlineCount > 0 ? "" : "none";
 
   if (!devices.length) {
-    grid.innerHTML = '<p class="empty">暂无设备上报数据。请确认客户端已运行。</p>';
+    grid.innerHTML = '<p class="empty">NO DEVICES // 等待客户端上报数据...</p>';
     return;
   }
   grid.innerHTML = devices
     .map((d) => {
       const status = d.online
-        ? '<span class="badge online">在线</span>'
-        : '<span class="badge offline">离线</span>';
+        ? '<span class="badge online">ONLINE</span>'
+        : '<span class="badge offline">OFFLINE</span>';
       const cpu = d.cpu_percent ?? 0;
       const mem = d.memory_percent ?? 0;
-      // 离线设备显示删除按钮（在线设备不允许从列表删，避免误删临时断线）
+      const cpuCls = loadClass(cpu);
+      const memCls = loadClass(mem);
+      // 离线设备显示删除按钮
       const delBtn = d.online
         ? ""
-        : `<button class="card-del-btn" data-id="${escapeHtml(d.device_id)}" data-name="${escapeHtml(d.hostname || d.device_id)}" title="删除该设备">删除</button>`;
+        : `<button class="card-del-btn" data-id="${escapeHtml(d.device_id)}" data-name="${escapeHtml(d.hostname || d.device_id)}" title="删除该设备">DEL</button>`;
       return `
         <div class="device-card" data-id="${escapeHtml(d.device_id)}">
           <div class="card-head">
@@ -204,13 +226,21 @@ function renderDevices(devices) {
             ${status}
           </div>
           <div class="card-os">${escapeHtml(d.os_name || "")} ${escapeHtml(d.os_version || "")}</div>
-          <div class="card-ip">公网 IP：${escapeHtml(d.ip_public || "-")}</div>
+          <div class="card-ip">${escapeHtml(d.ip_public || "-")}</div>
           <div class="card-metrics">
-            <div class="metric"><span class="label">CPU</span><span class="value">${cpu.toFixed(1)}%</span></div>
-            <div class="metric"><span class="label">内存</span><span class="value">${mem.toFixed(1)}%</span></div>
+            <div class="metric">
+              <span class="label">CPU</span>
+              <span class="value ${cpuCls}">${cpu.toFixed(1)}%</span>
+              <span class="bar ${cpuCls}">${asciiBar(cpu)}</span>
+            </div>
+            <div class="metric">
+              <span class="label">MEM</span>
+              <span class="value ${memCls}">${mem.toFixed(1)}%</span>
+              <span class="bar ${memCls}">${asciiBar(mem)}</span>
+            </div>
           </div>
           <div class="card-foot">
-            <span>更新：${fmtAgo(d.last_seen)}</span>
+            <span class="updated">${fmtAgo(d.last_seen)}</span>
             ${delBtn}
           </div>
         </div>`;
@@ -300,8 +330,8 @@ function renderDetail(d) {
   const mem = d.memory_percent ?? 0;
   const availableMemory = d.available_memory ?? calcAvailableMemory(d.total_memory, mem);
   const status = d.online
-    ? '<span class="badge online">在线</span>'
-    : '<span class="badge offline">离线</span>';
+    ? '<span class="badge online">ONLINE</span>'
+    : '<span class="badge offline">OFFLINE</span>';
 
   $("#detail-live").innerHTML = `
     <div class="detail-head">
@@ -320,12 +350,12 @@ function renderDetail(d) {
 
     <div class="big-metrics">
       <div class="big-metric">
-        <div class="ring" style="--p:${cpu.toFixed(0)}"><span>${cpu.toFixed(1)}%</span></div>
+        <div class="ring ${loadClass(cpu)}" style="--p:${cpu.toFixed(0)}"><span>${cpu.toFixed(1)}%</span></div>
         <span>CPU</span>
       </div>
       <div class="big-metric">
-        <div class="ring" style="--p:${mem.toFixed(0)}"><span>${mem.toFixed(1)}%</span></div>
-        <span>内存</span>
+        <div class="ring ${loadClass(mem)}" style="--p:${mem.toFixed(0)}"><span>${mem.toFixed(1)}%</span></div>
+        <span>MEM</span>
       </div>
     </div>
 
@@ -411,13 +441,13 @@ function drawCharts(points) {
   const txData = points.map((p) => p.net_tx);
 
   charts.cpu = updateLineChart(charts.cpu, $("#chart-cpu"), labels, [
-    { label: "CPU %", data: cpuData, borderColor: "#3b82f6", tension: 0.3, fill: false },
-    { label: "内存 %", data: memData, borderColor: "#10b981", tension: 0.3, fill: false },
+    { label: "CPU %", data: cpuData, borderColor: "#00ff41", tension: 0.3, fill: false },
+    { label: "内存 %", data: memData, borderColor: "#ffb000", tension: 0.3, fill: false },
   ]);
 
   charts.net = updateLineChart(charts.net, $("#chart-net"), labels, [
-    { label: "下行 B/s", data: rxData, borderColor: "#f59e0b", tension: 0.3, fill: false },
-    { label: "上行 B/s", data: txData, borderColor: "#ef4444", tension: 0.3, fill: false },
+    { label: "下行 B/s", data: rxData, borderColor: "#00e5e5", tension: 0.3, fill: false },
+    { label: "上行 B/s", data: txData, borderColor: "#ff3344", tension: 0.3, fill: false },
   ]);
 }
 
@@ -427,7 +457,12 @@ function updateLineChart(chart, canvas, labels, datasets) {
     return new Chart(canvas, {
       type: "line",
       data: { labels, datasets },
-      options: { responsive: true, animation: false, plugins: { legend: { labels: { color: "#cbd5e1" } } }, scales: gridStyle() },
+      options: {
+        responsive: true,
+        animation: false,
+        plugins: { legend: { labels: { color: "#4a8a4a", font: { family: "monospace" } } } },
+        scales: gridStyle(),
+      },
     });
   }
   chart.data.labels = labels;
@@ -437,8 +472,8 @@ function updateLineChart(chart, canvas, labels, datasets) {
 }
 
 function gridStyle() {
-  const ticks = { color: "#94a3b8" };
-  const grid = { color: "rgba(148,163,184,0.1)" };
+  const ticks = { color: "#4a8a4a", font: { family: "monospace" } };
+  const grid = { color: "rgba(0, 255, 65, 0.08)" };
   return { x: { ticks, grid }, y: { ticks, grid, beginAtZero: true } };
 }
 
